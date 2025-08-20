@@ -1,58 +1,153 @@
+// main.dart
 import 'dart:async';
-import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:http/http.dart' as http;
 
-// --- Placeholder Provider Classes ---
+// ===== DATA MODELS AND PROVIDERS =====
+class Question {
+  final String questionText;
+  final List<Answer> answers;
+  final String? explanation;
+  final String difficulty;
+
+  Question({
+    required this.questionText,
+    required this.answers,
+    this.explanation,
+    required this.difficulty,
+  });
+}
+
+class Answer {
+  final String text;
+  final bool isCorrect;
+  Answer({required this.text, required this.isCorrect});
+}
+
+class LeaderboardEntry {
+  final String userId;
+  final String name;
+  final int score;
+
+  LeaderboardEntry({
+    required this.userId,
+    required this.name,
+    required this.score,
+  });
+}
 
 class UserProvider with ChangeNotifier {
-  final List<LeaderboardEntry> _leaderboardData = [
-    LeaderboardEntry(userId: 'user1', name: 'Alice', score: 1200),
-    LeaderboardEntry(userId: 'user2', name: 'Bob', score: 1150),
-    LeaderboardEntry(userId: 'user3', name: 'Charlie', score: 1050),
-    LeaderboardEntry(userId: 'user4', name: 'Diana', score: 900),
-    LeaderboardEntry(userId: 'current_user_id', name: 'You', score: 950),
-  ];
-  String? _currentUserId;
+  String _currentUserId = '';
+  String _currentUserName = 'Guest';
+  int _score = 0;
+  List<LeaderboardEntry> _leaderboardData = [];
+  bool _isLoggedIn = false;
+  bool _isInitialized = false;
 
-  String? get currentUserId => _currentUserId;
-  User? get currentUser =>
-      _currentUserId != null ? User(id: _currentUserId!, name: 'You') : null;
-
+  String get currentUserId => _currentUserId;
+  String get currentUserName => _currentUserName;
+  int get score => _score;
   List<LeaderboardEntry> get leaderboardData {
     _leaderboardData.sort((a, b) => b.score.compareTo(a.score));
     return _leaderboardData;
   }
 
-  void setCurrentUser(String userId) {
-    _currentUserId = userId;
+  bool get isLoggedIn => _isLoggedIn;
+  bool get isInitialized => _isInitialized;
+
+  Future<void> initUser() async {
+    _isInitialized = false;
+    final prefs = await SharedPreferences.getInstance();
+    _isLoggedIn = prefs.getBool('isLoggedIn') ?? false;
+    _currentUserId = prefs.getString('userId') ?? 'guest_user';
+    _currentUserName = prefs.getString('userName') ?? 'Guest';
+    if (_isLoggedIn) {
+      // Simulate loading initial leaderboard data for a logged-in user
+      _leaderboardData = [
+        LeaderboardEntry(userId: 'user1', name: 'Alice', score: 120),
+        LeaderboardEntry(userId: 'user2', name: 'Bob', score: 95),
+        LeaderboardEntry(userId: 'user3', name: 'Charlie', score: 150),
+        LeaderboardEntry(
+          userId: _currentUserId,
+          name: _currentUserName,
+          score: _score,
+        ),
+      ];
+    }
+    _isInitialized = true;
+    notifyListeners();
+  }
+
+  Future<void> login(String userName) async {
+    final prefs = await SharedPreferences.getInstance();
+    _isLoggedIn = true;
+    _currentUserId = DateTime.now().millisecondsSinceEpoch.toString();
+    _currentUserName = userName;
+    await prefs.setBool('isLoggedIn', true);
+    await prefs.setString('userId', _currentUserId);
+    await prefs.setString('userName', _currentUserName);
+    // Add the new user to the simulated leaderboard
+    _leaderboardData.add(
+      LeaderboardEntry(
+        userId: _currentUserId,
+        name: _currentUserName,
+        score: 0,
+      ),
+    );
+    notifyListeners();
+  }
+
+  Future<void> logout() async {
+    final prefs = await SharedPreferences.getInstance();
+    _isLoggedIn = false;
+    _currentUserId = 'guest_user';
+    _currentUserName = 'Guest';
+    _score = 0;
+    _leaderboardData.removeWhere((entry) => entry.userId == currentUserId);
+    await prefs.setBool('isLoggedIn', false);
+    await prefs.remove('userId');
+    await prefs.remove('userName');
     notifyListeners();
   }
 
   void updateScore(int score) {
-    final userIndex = _leaderboardData.indexWhere(
-      (entry) => entry.userId == _currentUserId,
+    _score = score;
+    // Update the score on the leaderboard
+    final index = _leaderboardData.indexWhere(
+      (e) => e.userId == _currentUserId,
     );
-    if (userIndex != -1) {
-      _leaderboardData[userIndex] = LeaderboardEntry(
-        userId: _currentUserId!,
-        name: _leaderboardData[userIndex].name,
-        score: _leaderboardData[userIndex].score + score * 10,
+    if (index != -1) {
+      _leaderboardData[index] = LeaderboardEntry(
+        userId: _currentUserId,
+        name: _currentUserName,
+        score: _score,
       );
-      notifyListeners();
     }
+    notifyListeners();
   }
 
-  void logout() {
-    _currentUserId = null;
+  void updateUserName(String newName) {
+    _currentUserName = newName;
+    final index = _leaderboardData.indexWhere(
+      (e) => e.userId == _currentUserId,
+    );
+    if (index != -1) {
+      _leaderboardData[index] = LeaderboardEntry(
+        userId: _currentUserId,
+        name: newName,
+        score: _score,
+      );
+    }
     notifyListeners();
+    SharedPreferences.getInstance().then((prefs) {
+      prefs.setString('userName', newName);
+    });
   }
 }
 
 class ThemeProvider with ChangeNotifier {
-  ThemeMode _themeMode = ThemeMode.light;
+  ThemeMode _themeMode = ThemeMode.system;
   ThemeMode get themeMode => _themeMode;
 
   void toggleTheme() {
@@ -63,79 +158,64 @@ class ThemeProvider with ChangeNotifier {
   }
 }
 
-class UserQuizProvider with ChangeNotifier {
-  final List<Map<String, List<Map<String, Object>>>> _userQuizzes = [];
-  List<Map<String, List<Map<String, Object>>>> get userQuizzes => _userQuizzes;
+// ===== QUIZ DATA =====
+const List<Map<String, Object>> dummyQuestions = [
+  {
+    'questionText': 'What is the capital of France?',
+    'answers': [
+      {'text': 'Berlin', 'isCorrect': false},
+      {'text': 'Madrid', 'isCorrect': false},
+      {'text': 'Paris', 'isCorrect': true},
+      {'text': 'Rome', 'isCorrect': false},
+    ],
+    'explanation': 'Paris is the capital and most populous city of France.',
+    'difficulty': 'easy',
+  },
+  {
+    'questionText': 'Which planet is known as the "Red Planet"?',
+    'answers': [
+      {'text': 'Earth', 'isCorrect': false},
+      {'text': 'Mars', 'isCorrect': true},
+      {'text': 'Jupiter', 'isCorrect': false},
+      {'text': 'Venus', 'isCorrect': false},
+    ],
+    'explanation':
+        'Mars is often called the Red Planet because of its reddish appearance.',
+    'difficulty': 'easy',
+  },
+  {
+    'questionText': 'What is the largest ocean on Earth?',
+    'answers': [
+      {'text': 'Atlantic Ocean', 'isCorrect': false},
+      {'text': 'Indian Ocean', 'isCorrect': false},
+      {'text': 'Arctic Ocean', 'isCorrect': false},
+      {'text': 'Pacific Ocean', 'isCorrect': true},
+    ],
+    'explanation':
+        'The Pacific Ocean is the largest and deepest of Earth\'s five oceans.',
+    'difficulty': 'medium',
+  },
+  {
+    'questionText': 'Who wrote "To Kill a Mockingbird"?',
+    'answers': [
+      {'text': 'J.K. Rowling', 'isCorrect': false},
+      {'text': 'Harper Lee', 'isCorrect': true},
+      {'text': 'Stephen King', 'isCorrect': false},
+      {'text': 'Mark Twain', 'isCorrect': false},
+    ],
+    'explanation':
+        'Harper Lee\'s "To Kill a Mockingbird" won the Pulitzer Prize in 1961.',
+    'difficulty': 'hard',
+  },
+];
 
-  void addQuiz(String category, List<Map<String, Object>> questions) {
-    _userQuizzes.add({category: questions});
-    notifyListeners();
-  }
-}
-
-class ApiProvider with ChangeNotifier {
-  Future<List<Map<String, Object>>?> fetchApiQuestions() async {
-    const url = 'https://the-trivia-api.com/v2/questions?limit=10';
-    try {
-      final response = await http.get(Uri.parse(url));
-      if (response.statusCode == 200) {
-        final List<dynamic> data = json.decode(response.body);
-        return data.map<Map<String, Object>>((json) {
-          final List<String> incorrectAnswers = List<String>.from(
-            json['incorrectAnswers'],
-          );
-          final String correctAnswer = json['correctAnswer'];
-
-          List<Map<String, Object>> answers = [
-            ...incorrectAnswers.map(
-              (text) => {'text': text, 'isCorrect': false},
-            ),
-            {'text': correctAnswer, 'isCorrect': true},
-          ];
-          answers.shuffle(); // Shuffle to randomize answer order
-
-          return {
-            'questionText': json['question']['text'],
-            'answers': answers,
-            'explanation': '',
-          };
-        }).toList();
-      } else {
-        return null;
-      }
-    } catch (e) {
-      return null;
-    }
-  }
-}
-
-class LeaderboardEntry {
-  final String userId;
-  final String name;
-  final int score;
-  LeaderboardEntry({
-    required this.userId,
-    required this.name,
-    required this.score,
-  });
-}
-
-class User {
-  final String id;
-  final String name;
-  User({required this.id, required this.name});
-}
-
-// --- Main Application Widget ---
-
+// ===== MAIN APP WIDGET =====
 void main() {
   runApp(
     MultiProvider(
       providers: [
-        ChangeNotifierProvider(create: (_) => UserProvider()),
+        ChangeNotifierProvider(create: (_) => UserProvider()..initUser()),
         ChangeNotifierProvider(create: (_) => ThemeProvider()),
-        ChangeNotifierProvider(create: (_) => UserQuizProvider()),
-        ChangeNotifierProvider(create: (_) => ApiProvider()),
       ],
       child: const QuizApp(),
     ),
@@ -148,202 +228,73 @@ class QuizApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final themeProvider = Provider.of<ThemeProvider>(context);
-
-    final ThemeData customTheme = ThemeData(
-      brightness: Brightness.light,
-      colorScheme: ColorScheme.fromSeed(
-        seedColor: const Color(0xFF2ECC71),
-        primary: const Color(0xFF2ECC71),
-        onPrimary: Colors.white,
-        secondary: const Color(0xFF1C1C1C),
-        onSecondary: Colors.white,
-        tertiary: const Color(0xFFF1C40F),
-        onTertiary: Colors.black,
-        surface: const Color(0xFFF0F0F0),
-        onSurface: const Color(0xFF1C1C1C),
-      ),
-      fontFamily: 'Montserrat',
-      textTheme: const TextTheme(
-        headlineMedium: TextStyle(
-          fontWeight: FontWeight.bold,
-          fontSize: 24,
-          color: Color(0xFF1C1C1C),
-        ),
-        bodyMedium: TextStyle(fontSize: 16, color: Color(0xFF1C1C1C)),
-        titleLarge: TextStyle(fontWeight: FontWeight.bold, fontSize: 24),
-      ),
-      elevatedButtonTheme: ElevatedButtonThemeData(
-        style: ElevatedButton.styleFrom(
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(12),
-          ),
-          padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 24),
-          foregroundColor: Colors.white,
-          backgroundColor: const Color(0xFF2ECC71),
-        ),
-      ),
-      cardTheme: CardThemeData(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
-        elevation: 5,
-        shadowColor: Colors.black.withOpacity(0.2),
-      ),
-      appBarTheme: const AppBarTheme(elevation: 0, centerTitle: true),
-    );
+    final userProvider = Provider.of<UserProvider>(context);
 
     return MaterialApp(
-      title: 'MindSpark',
-      theme: customTheme,
-      darkTheme: ThemeData.dark().copyWith(
-        colorScheme: const ColorScheme.dark(
-          primary: Color(0xFF2ECC71),
-          onPrimary: Colors.white,
-          secondary: Color(0xFFF1C40F),
-          onSecondary: Colors.black,
-          tertiary: Color(0xFFF1C40F),
-          onTertiary: Colors.black,
-          surface: Color(0xFF252525),
-          onSurface: Colors.white,
-        ),
-        elevatedButtonTheme: ElevatedButtonThemeData(
-          style: ElevatedButton.styleFrom(
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(12),
-            ),
-            padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 24),
-            foregroundColor: Colors.black,
-            backgroundColor: const Color(0xFFF1C40F),
-          ),
-        ),
-        cardTheme: CardThemeData(
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(15),
-          ),
-          elevation: 5,
-          shadowColor: Colors.black.withOpacity(0.4),
-        ),
-        appBarTheme: const AppBarTheme(elevation: 0, centerTitle: true),
-        textTheme: const TextTheme(
-          headlineMedium: TextStyle(
-            fontWeight: FontWeight.bold,
-            fontSize: 24,
-            color: Colors.white,
-          ),
-          bodyMedium: TextStyle(fontSize: 16, color: Colors.white70),
-          titleLarge: TextStyle(fontWeight: FontWeight.bold, fontSize: 24),
+      title: 'Quiz Quest',
+      debugShowCheckedModeBanner: false,
+      themeMode: themeProvider.themeMode,
+      theme: ThemeData(
+        useMaterial3: true,
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: Colors.teal,
+          primary: Colors.teal,
+          secondary: Colors.amber,
+          tertiary: Colors.purple,
+          brightness: Brightness.light,
         ),
       ),
-      themeMode: themeProvider.themeMode,
-      home: const AuthScreen(),
+      darkTheme: ThemeData(
+        useMaterial3: true,
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: Colors.teal,
+          primary: Colors.teal.shade200,
+          secondary: Colors.amber.shade200,
+          tertiary: Colors.purple.shade200,
+          brightness: Brightness.dark,
+        ),
+      ),
+      home: userProvider.isInitialized
+          ? (userProvider.isLoggedIn ? const MainScreen() : const AuthScreen())
+          : const SplashScreen(),
     );
   }
 }
 
-// --- Authentication and State Management ---
-
-class AuthScreen extends StatefulWidget {
-  const AuthScreen({super.key});
-
-  @override
-  State<AuthScreen> createState() => _AuthScreenState();
-}
-
-class _AuthScreenState extends State<AuthScreen> {
-  bool _isLoggedIn = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _checkLoginStatus();
-  }
-
-  void _checkLoginStatus() async {
-    final prefs = await SharedPreferences.getInstance();
-    final userId = prefs.getString('userId');
-    if (userId != null) {
-      Provider.of<UserProvider>(context, listen: false).setCurrentUser(userId);
-      setState(() {
-        _isLoggedIn = true;
-      });
-    }
-  }
-
-  void _login(String userId) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('userId', userId);
-    Provider.of<UserProvider>(context, listen: false).setCurrentUser(userId);
-    setState(() {
-      _isLoggedIn = true;
-    });
-  }
-
-  void _logout() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.remove('userId');
-    Provider.of<UserProvider>(context, listen: false).logout();
-    setState(() {
-      _isLoggedIn = false;
-    });
-  }
+class SplashScreen extends StatelessWidget {
+  const SplashScreen({super.key});
 
   @override
   Widget build(BuildContext context) {
-    if (_isLoggedIn) {
-      return const HomeScreen();
-    } else {
-      return Scaffold(
-        body: Center(
-          child: Padding(
-            padding: const EdgeInsets.all(24.0),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(
-                  Icons.lock_open,
-                  size: 100,
-                  color: Theme.of(context).colorScheme.primary,
-                ),
-                const SizedBox(height: 20),
-                Text(
-                  'Welcome to MindSpark!',
-                  style: Theme.of(context).textTheme.headlineMedium,
-                  textAlign: TextAlign.center,
-                ),
-                const SizedBox(height: 10),
-                Text(
-                  'Log in to save your progress and compete on the leaderboard.',
-                  style: Theme.of(context).textTheme.bodyMedium,
-                  textAlign: TextAlign.center,
-                ),
-                const SizedBox(height: 40),
-                ElevatedButton(
-                  onPressed: () => _login('current_user_id'),
-                  child: const Text('Log In as Guest'),
-                ),
-              ],
-            ),
-          ),
+    return const Scaffold(
+      body: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            CircularProgressIndicator(),
+            SizedBox(height: 20),
+            Text('Loading Quiz Quest...'),
+          ],
         ),
-      );
-    }
+      ),
+    );
   }
 }
 
-// --- Home Screen with Navigation ---
-
-class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key});
+class MainScreen extends StatefulWidget {
+  const MainScreen({super.key});
 
   @override
-  State<HomeScreen> createState() => _HomeScreenState();
+  State<MainScreen> createState() => _MainScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
+class _MainScreenState extends State<MainScreen> {
   int _selectedIndex = 0;
-
-  final List<Widget> _screens = [
-    const WelcomeScreen(),
-    const LeaderboardScreen(),
-    const SettingsScreen(),
+  static const List<Widget> _widgetOptions = <Widget>[
+    WelcomeScreen(),
+    CategoryScreen(),
+    SettingsScreen(),
+    LeaderboardScreen(),
   ];
 
   void _onItemTapped(int index) {
@@ -355,164 +306,226 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: _screens[_selectedIndex],
+      body: Center(child: _widgetOptions.elementAt(_selectedIndex)),
       bottomNavigationBar: BottomNavigationBar(
         items: const <BottomNavigationBarItem>[
           BottomNavigationBarItem(icon: Icon(Icons.home), label: 'Home'),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.leaderboard),
-            label: 'Leaderboard',
-          ),
+          BottomNavigationBarItem(icon: Icon(Icons.quiz), label: 'Quizzes'),
           BottomNavigationBarItem(
             icon: Icon(Icons.settings),
             label: 'Settings',
           ),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.leaderboard),
+            label: 'Leaderboard',
+          ),
         ],
         currentIndex: _selectedIndex,
         selectedItemColor: Theme.of(context).colorScheme.primary,
-        unselectedItemColor: Theme.of(
-          context,
-        ).colorScheme.onSurface.withOpacity(0.5),
+        unselectedItemColor: Colors.grey,
         onTap: _onItemTapped,
       ),
     );
   }
 }
 
-// --- Quiz Flow Screens ---
+// ===== AUTHENTICATION SCREEN =====
+class AuthScreen extends StatefulWidget {
+  const AuthScreen({super.key});
 
-final Map<String, List<Map<String, Object>>> quizData = {
-  'Flutter Basics': [
-    {
-      'questionText': 'What is the main programming language used in Flutter?',
-      'answers': [
-        {'text': 'Java', 'isCorrect': false},
-        {'text': 'Python', 'isCorrect': false},
-        {'text': 'Dart', 'isCorrect': true},
-        {'text': 'JavaScript', 'isCorrect': false},
-      ],
-      'explanation':
-          'Dart is a client-optimized language for fast apps on any platform.',
-    },
-    {
-      'questionText': 'Which widget is used to display text in Flutter?',
-      'answers': [
-        {'text': 'Container', 'isCorrect': false},
-        {'text': 'Column', 'isCorrect': false},
-        {'text': 'Text', 'isCorrect': true},
-        {'text': 'Image', 'isCorrect': false},
-      ],
-      'explanation':
-          'The Text widget is used to display a string of text with a single style.',
-    },
-  ],
-  'General Knowledge': [
-    {
-      'questionText': 'What is the capital of France?',
-      'answers': [
-        {'text': 'Berlin', 'isCorrect': false},
-        {'text': 'Madrid', 'isCorrect': false},
-        {'text': 'Paris', 'isCorrect': true},
-        {'text': 'Rome', 'isCorrect': false},
-      ],
-      'explanation': 'Paris is known as the City of Light.',
-    },
-  ],
-};
+  @override
+  State<AuthScreen> createState() => _AuthScreenState();
+}
+
+class _AuthScreenState extends State<AuthScreen> {
+  final _nameController = TextEditingController();
+
+  @override
+  void dispose() {
+    _nameController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(32.0),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Text(
+                'Welcome to Quiz Quest!',
+                style: Theme.of(context).textTheme.headlineMedium,
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 20),
+              TextField(
+                controller: _nameController,
+                decoration: InputDecoration(
+                  labelText: 'Enter Your Name',
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 20),
+              ElevatedButton(
+                onPressed: () {
+                  if (_nameController.text.isNotEmpty) {
+                    Provider.of<UserProvider>(
+                      context,
+                      listen: false,
+                    ).login(_nameController.text);
+                  }
+                },
+                child: const Text('Start Playing'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ===== APP SCREENS (PAGES) =====
+class WelcomeScreen extends StatelessWidget {
+  const WelcomeScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final userName = Provider.of<UserProvider>(context).currentUserName;
+    return Scaffold(
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24.0),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const Hero(
+                tag: 'logo',
+                child: Icon(Icons.emoji_events, size: 150, color: Colors.amber),
+              ),
+              const SizedBox(height: 20),
+              Text(
+                'Welcome, $userName!',
+                style: Theme.of(context).textTheme.headlineMedium,
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 10),
+              Text(
+                'Test Your Knowledge on Quiz Quest!',
+                style: Theme.of(context).textTheme.bodyMedium,
+                textAlign: TextAlign.center,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
 
 class CategoryScreen extends StatelessWidget {
   const CategoryScreen({super.key});
 
   @override
   Widget build(BuildContext context) {
-    final userQuizProvider = Provider.of<UserQuizProvider>(context);
-
-    final Map<String, List<Map<String, Object>>> allCategories = {};
-    allCategories.addAll(quizData);
-    for (var quizMap in userQuizProvider.userQuizzes) {
-      allCategories.addAll(quizMap);
-    }
+    final easyQuestions = dummyQuestions
+        .where((q) => q['difficulty'] == 'easy')
+        .toList();
+    final mediumQuestions = dummyQuestions
+        .where((q) => q['difficulty'] == 'medium')
+        .toList();
+    final hardQuestions = dummyQuestions
+        .where((q) => q['difficulty'] == 'hard')
+        .toList();
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Choose a Category'),
+        title: const Text('Choose a Quiz Difficulty'),
         backgroundColor: Theme.of(context).colorScheme.primary,
         foregroundColor: Theme.of(context).colorScheme.onPrimary,
       ),
-      body: ListView(
+      body: Padding(
         padding: const EdgeInsets.all(16.0),
-        children: [
-          ...allCategories.entries.map((entry) {
-            final categoryName = entry.key;
-            final questions = entry.value;
-            return Card(
-              margin: const EdgeInsets.symmetric(vertical: 8.0),
-              child: ListTile(
-                title: Text(categoryName),
-                onTap: () {
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (context) => QuizScreen(
-                        category: categoryName,
-                        questions: questions,
-                      ),
-                    ),
-                  );
-                },
-              ),
-            );
-          }),
-          Card(
-            margin: const EdgeInsets.symmetric(vertical: 8.0),
-            child: ListTile(
-              title: const Text('Random API Quiz'),
-              subtitle: const Text('Fetch a new quiz from an external API!'),
-              onTap: () async {
-                final apiProvider = Provider.of<ApiProvider>(
+        child: Column(
+          children: [
+            _buildDifficultyCard(context, 'Easy', Colors.green, easyQuestions),
+            _buildDifficultyCard(
+              context,
+              'Medium',
+              Colors.orange,
+              mediumQuestions,
+            ),
+            _buildDifficultyCard(context, 'Hard', Colors.red, hardQuestions),
+            const SizedBox(height: 20),
+            ElevatedButton.icon(
+              onPressed: () {
+                Navigator.push(
                   context,
-                  listen: false,
+                  MaterialPageRoute(
+                    builder: (context) => const QuizCreationScreen(),
+                  ),
                 );
-                final questions = await apiProvider.fetchApiQuestions();
-                if (questions != null) {
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (context) => QuizScreen(
-                        category: 'Random API Quiz',
-                        questions: questions,
-                      ),
-                    ),
-                  );
-                } else {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text(
-                        'Failed to fetch API questions. Please try again.',
-                      ),
-                    ),
-                  );
-                }
               },
+              icon: const Icon(Icons.create),
+              label: const Text('Create Your Own Quiz'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Theme.of(context).colorScheme.tertiary,
+              ),
             ),
-          ),
-          const SizedBox(height: 20),
-          ElevatedButton.icon(
-            onPressed: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (context) => const QuizCreationScreen(),
-                ),
-              );
-            },
-            icon: const Icon(Icons.create),
-            label: const Text('Create Your Own Quiz'),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: Theme.of(context).colorScheme.tertiary,
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDifficultyCard(
+    BuildContext context,
+    String title,
+    Color color,
+    List<Map<String, Object>> questions,
+  ) {
+    if (questions.isEmpty) {
+      return Container();
+    }
+    final List<Question> quizQuestions = questions.map((q) {
+      return Question(
+        questionText: q['questionText'] as String,
+        answers: (q['answers'] as List)
+            .map(
+              (a) => Answer(
+                text: a['text'] as String,
+                isCorrect: a['isCorrect'] as bool,
+              ),
+            )
+            .toList(),
+        explanation: q['explanation'] as String?,
+        difficulty: q['difficulty'] as String,
+      );
+    }).toList();
+
+    return Card(
+      color: color.withOpacity(0.1),
+      child: ListTile(
+        title: Text(
+          title,
+          style: TextStyle(color: color, fontWeight: FontWeight.bold),
+        ),
+        trailing: const Icon(Icons.arrow_forward_ios),
+        onTap: () {
+          Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (context) =>
+                  QuizScreen(category: title, questions: quizQuestions),
             ),
-          ),
-        ],
+          );
+        },
       ),
     );
   }
@@ -520,7 +533,7 @@ class CategoryScreen extends StatelessWidget {
 
 class QuizScreen extends StatefulWidget {
   final String category;
-  final List<Map<String, Object>> questions;
+  final List<Question> questions;
   const QuizScreen({
     super.key,
     required this.category,
@@ -536,17 +549,18 @@ class _QuizScreenState extends State<QuizScreen> {
   int _score = 0;
   bool _isAnswered = false;
   late Timer _timer;
-  static const int quizDuration = 100; // 10 minutes in seconds
+  static const int quizDuration = 100;
   int _remainingTime = quizDuration;
+
+  final Map<bool, String> feedbackMessages = {
+    true: 'Brilliant!',
+    false: 'Don\'t give up! Failure is a stepping stone to success.',
+  };
 
   @override
   void initState() {
     super.initState();
     _startTimer();
-    _shuffleQuestions();
-  }
-
-  void _shuffleQuestions() {
     widget.questions.shuffle();
   }
 
@@ -589,10 +603,24 @@ class _QuizScreenState extends State<QuizScreen> {
     if (_isAnswered) return;
     setState(() {
       _isAnswered = true;
+      if (isCorrect) {
+        _score++;
+      }
     });
-    if (isCorrect) {
-      _score++;
-    }
+
+    // Show a snackbar with the personalized feedback
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          feedbackMessages[isCorrect]!,
+          style: const TextStyle(fontWeight: FontWeight.bold),
+        ),
+        backgroundColor: isCorrect ? Colors.green : Colors.red,
+        behavior: SnackBarBehavior.floating,
+        duration: const Duration(seconds: 2),
+      ),
+    );
+
     Future.delayed(const Duration(milliseconds: 1500), () {
       if (mounted) {
         setState(() {
@@ -662,7 +690,7 @@ class _QuizScreenState extends State<QuizScreen> {
 }
 
 class Quiz extends StatefulWidget {
-  final Map<String, Object> questionData;
+  final Question questionData;
   final Function(bool) answerQuestion;
   final bool isAnswered;
   const Quiz({
@@ -704,8 +732,8 @@ class _QuizState extends State<Quiz> with TickerProviderStateMixin {
   @override
   void didUpdateWidget(covariant Quiz oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.questionData['questionText'] !=
-        widget.questionData['questionText']) {
+    if (oldWidget.questionData.questionText !=
+        widget.questionData.questionText) {
       _questionController.reset();
       _answerController.reset();
       _startAnimations();
@@ -721,9 +749,9 @@ class _QuizState extends State<Quiz> with TickerProviderStateMixin {
 
   @override
   Widget build(BuildContext context) {
-    final questionText = widget.questionData['questionText'] as String;
-    final answers = widget.questionData['answers'] as List<Map<String, Object>>;
-    final explanation = widget.questionData['explanation'] as String?;
+    final questionText = widget.questionData.questionText;
+    final answers = widget.questionData.answers;
+    final explanation = widget.questionData.explanation;
 
     return Padding(
       padding: const EdgeInsets.all(16.0),
@@ -775,19 +803,17 @@ class _QuizState extends State<Quiz> with TickerProviderStateMixin {
                       child: ElevatedButton(
                         onPressed: widget.isAnswered
                             ? null
-                            : () => widget.answerQuestion(
-                                answer['isCorrect'] as bool,
-                              ),
+                            : () => widget.answerQuestion(answer.isCorrect),
                         style: ElevatedButton.styleFrom(
                           backgroundColor: widget.isAnswered
-                              ? (answer['isCorrect'] as bool
+                              ? (answer.isCorrect
                                     ? Colors.green.withOpacity(0.7)
                                     : Colors.red.withOpacity(0.7))
                               : Theme.of(context).colorScheme.primary,
                           elevation: 3,
                         ),
                         child: Text(
-                          answer['text'] as String,
+                          answer.text,
                           style: TextStyle(
                             fontSize: 18,
                             color: Theme.of(context).colorScheme.onPrimary,
@@ -831,7 +857,6 @@ class ResultScreen extends StatelessWidget {
     required this.score,
     required this.totalQuestions,
   });
-
   String get _getRewardType {
     if (score == totalQuestions) {
       return 'master';
@@ -905,203 +930,48 @@ class ResultScreen extends StatelessWidget {
   }
 }
 
-class LeaderboardScreen extends StatelessWidget {
-  const LeaderboardScreen({super.key});
+class SettingsScreen extends StatefulWidget {
+  const SettingsScreen({super.key});
+  @override
+  State<SettingsScreen> createState() => _SettingsScreenState();
+}
+
+class _SettingsScreenState extends State<SettingsScreen> {
+  late TextEditingController _nameController;
+
+  @override
+  void initState() {
+    super.initState();
+    final userProvider = Provider.of<UserProvider>(context, listen: false);
+    _nameController = TextEditingController(text: userProvider.currentUserName);
+  }
+
+  @override
+  void dispose() {
+    _nameController.dispose();
+    super.dispose();
+  }
+
+  void _updateUserName() {
+    if (_nameController.text.isNotEmpty) {
+      Provider.of<UserProvider>(
+        context,
+        listen: false,
+      ).updateUserName(_nameController.text);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Name updated successfully!')),
+      );
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     final userProvider = Provider.of<UserProvider>(context);
+    final themeProvider = Provider.of<ThemeProvider>(context);
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Leaderboard'),
-        backgroundColor: Theme.of(context).colorScheme.primary,
-        foregroundColor: Theme.of(context).colorScheme.onPrimary,
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            onPressed: () {
-              // In a real app, you would fetch updated leaderboard data from Firebase
-            },
-          ),
-        ],
-      ),
-      body: userProvider.leaderboardData.isEmpty
-          ? Center(
-              child: CircularProgressIndicator(
-                color: Theme.of(context).colorScheme.tertiary,
-              ),
-            )
-          : Padding(
-              padding: const EdgeInsets.all(16.0),
-              child: ListView.builder(
-                itemCount: userProvider.leaderboardData.length,
-                itemBuilder: (context, index) {
-                  final entry = userProvider.leaderboardData[index];
-                  final isCurrentUser =
-                      entry.userId == userProvider.currentUserId;
-                  return Card(
-                    elevation: isCurrentUser ? 8 : 4,
-                    color: isCurrentUser
-                        ? Theme.of(context).colorScheme.primary.withOpacity(0.1)
-                        : null,
-                    margin: const EdgeInsets.symmetric(vertical: 8.0),
-                    child: ListTile(
-                      leading: CircleAvatar(
-                        backgroundColor: isCurrentUser
-                            ? Theme.of(context).colorScheme.tertiary
-                            : Theme.of(context).colorScheme.primary,
-                        child: Text(
-                          '${index + 1}',
-                          style: TextStyle(
-                            color: Theme.of(context).colorScheme.onPrimary,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                      ),
-                      title: Text(
-                        entry.name,
-                        style: TextStyle(
-                          fontWeight: isCurrentUser
-                              ? FontWeight.bold
-                              : FontWeight.normal,
-                          color: Theme.of(context).colorScheme.primary,
-                        ),
-                      ),
-                      trailing: Text(
-                        'Score: ${entry.score}',
-                        style: Theme.of(context).textTheme.bodyLarge,
-                      ),
-                    ),
-                  );
-                },
-              ),
-            ),
-    );
-  }
-}
-
-class WelcomeScreen extends StatelessWidget {
-  const WelcomeScreen({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(24.0),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Hero(
-              tag: 'logo',
-              child: Icon(
-                Icons.emoji_events,
-                size: 150,
-                color: Theme.of(context).colorScheme.primary,
-              ),
-            ),
-            const SizedBox(height: 20),
-            Text(
-              'Test Your Knowledge!',
-              style: Theme.of(context).textTheme.headlineMedium,
-              textAlign: TextAlign.center,
-            ),
-            const SizedBox(height: 10),
-            Text(
-              'Choose a category and start your quiz quest or create your own!',
-              style: Theme.of(context).textTheme.bodyMedium,
-              textAlign: TextAlign.center,
-            ),
-            const SizedBox(height: 40),
-            ElevatedButton.icon(
-              onPressed: () {
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (context) => const CategoryScreen(),
-                  ),
-                );
-              },
-              icon: const Icon(Icons.play_arrow),
-              label: const Text('Start Quiz'),
-              style: ElevatedButton.styleFrom(
-                padding: const EdgeInsets.symmetric(vertical: 15),
-              ),
-            ),
-            const SizedBox(height: 10),
-            ElevatedButton.icon(
-              onPressed: () {
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (context) => const MultiplayerScreen(),
-                  ),
-                );
-              },
-              icon: const Icon(Icons.group),
-              label: const Text('Multiplayer Quiz'),
-              style: ElevatedButton.styleFrom(
-                padding: const EdgeInsets.symmetric(vertical: 15),
-                backgroundColor: Theme.of(context).colorScheme.tertiary,
-                foregroundColor: Theme.of(context).colorScheme.onTertiary,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class SettingsScreen extends StatelessWidget {
-  const SettingsScreen({super.key});
-  @override
-  Widget build(BuildContext context) {
-    return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Text(
-            'Settings Screen',
-            style: Theme.of(context).textTheme.titleLarge,
-          ),
-          const SizedBox(height: 20),
-          ElevatedButton.icon(
-            onPressed: () {
-              Provider.of<ThemeProvider>(context, listen: false).toggleTheme();
-            },
-            icon: const Icon(Icons.palette),
-            label: const Text('Toggle Dark/Light Mode'),
-          ),
-          const SizedBox(height: 20),
-          ElevatedButton.icon(
-            onPressed: () {
-              // This is where you would handle the logout logic
-              Provider.of<UserProvider>(context, listen: false).logout();
-            },
-            icon: const Icon(Icons.logout, color: Colors.red),
-            label: const Text('Log Out'),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.transparent,
-              elevation: 0,
-              shadowColor: Colors.transparent,
-              foregroundColor: Colors.red,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class MultiplayerScreen extends StatelessWidget {
-  const MultiplayerScreen({super.key});
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Multiplayer Quiz'),
+        title: const Text('Settings'),
         backgroundColor: Theme.of(context).colorScheme.primary,
         foregroundColor: Theme.of(context).colorScheme.onPrimary,
       ),
@@ -1111,34 +981,108 @@ class MultiplayerScreen extends StatelessWidget {
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              Icon(
-                Icons.group_add,
-                size: 100,
-                color: Theme.of(context).colorScheme.primary,
+              ListTile(
+                title: const Text('Toggle Dark/Light Mode'),
+                trailing: Switch(
+                  value: themeProvider.themeMode == ThemeMode.dark,
+                  onChanged: (value) {
+                    themeProvider.toggleTheme();
+                  },
+                ),
+              ),
+              const Divider(),
+              TextFormField(
+                controller: _nameController,
+                decoration: InputDecoration(
+                  labelText: 'Change Your Name',
+                  suffixIcon: IconButton(
+                    icon: const Icon(Icons.save),
+                    onPressed: _updateUserName,
+                  ),
+                ),
               ),
               const SizedBox(height: 20),
-              Text(
-                'This is where real-time multiplayer magic happens!',
-                textAlign: TextAlign.center,
-                style: Theme.of(context).textTheme.headlineMedium,
-              ),
-              const SizedBox(height: 10),
-              Text(
-                'Impress your audience with this professional feature. You can add logic here to create or join game rooms using Firebase.',
-                textAlign: TextAlign.center,
-                style: Theme.of(context).textTheme.bodyMedium,
-              ),
-              const SizedBox(height: 40),
-              ElevatedButton(
+              ElevatedButton.icon(
                 onPressed: () {
-                  Navigator.pop(context);
+                  userProvider.logout();
                 },
-                child: const Text('Go Back'),
+                icon: const Icon(Icons.logout, color: Colors.red),
+                label: const Text('Log Out'),
+                style: ElevatedButton.styleFrom(
+                  foregroundColor: Colors.red,
+                  backgroundColor: Colors.transparent,
+                  elevation: 0,
+                ),
               ),
             ],
           ),
         ),
       ),
+    );
+  }
+}
+
+class LeaderboardScreen extends StatelessWidget {
+  const LeaderboardScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final userProvider = Provider.of<UserProvider>(context);
+    final leaderboardData = userProvider.leaderboardData;
+    final currentUserId = userProvider.currentUserId;
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Leaderboard'),
+        backgroundColor: Theme.of(context).colorScheme.primary,
+        foregroundColor: Theme.of(context).colorScheme.onPrimary,
+      ),
+      body: leaderboardData.isEmpty
+          ? const Center(child: Text('No scores to display yet.'))
+          : ListView.builder(
+              padding: const EdgeInsets.all(16.0),
+              itemCount: leaderboardData.length,
+              itemBuilder: (context, index) {
+                final entry = leaderboardData[index];
+                final rank = index + 1;
+                final isCurrentUser = entry.userId == currentUserId;
+
+                return Card(
+                  color: isCurrentUser
+                      ? Theme.of(context).colorScheme.primary.withOpacity(0.2)
+                      : null,
+                  elevation: isCurrentUser ? 8 : 4,
+                  margin: const EdgeInsets.symmetric(vertical: 8.0),
+                  child: ListTile(
+                    leading: CircleAvatar(
+                      backgroundColor: isCurrentUser
+                          ? Theme.of(context).colorScheme.tertiary
+                          : Theme.of(context).colorScheme.primary,
+                      child: Text(
+                        '$rank',
+                        style: TextStyle(
+                          color: Theme.of(context).colorScheme.onPrimary,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                    title: Text(
+                      entry.name,
+                      style: TextStyle(
+                        fontWeight: isCurrentUser
+                            ? FontWeight.bold
+                            : FontWeight.normal,
+                        color: Theme.of(context).colorScheme.onSurface,
+                      ),
+                    ),
+                    trailing: Text(
+                      'Score: ${entry.score}',
+                      style: Theme.of(context).textTheme.bodyLarge,
+                    ),
+                  ),
+                );
+              },
+            ),
     );
   }
 }
@@ -1153,7 +1097,7 @@ class _QuizCreationScreenState extends State<QuizCreationScreen> {
   final _formKey = GlobalKey<FormState>();
   final _categoryController = TextEditingController();
   List<QuestionData> _questions = [QuestionData()];
-
+  String? _selectedDifficulty = 'easy';
   @override
   void dispose() {
     _categoryController.dispose();
@@ -1198,16 +1142,15 @@ class _QuizCreationScreenState extends State<QuizCreationScreen> {
           'questionText': q.questionController.text.trim(),
           'answers': answers,
           'explanation': q.explanationController.text.trim(),
+          'difficulty': _selectedDifficulty!,
         });
       }
 
-      Provider.of<UserQuizProvider>(
-        context,
-        listen: false,
-      ).addQuiz(category, newQuestions);
-
+      // This part would ideally save to a database. For this example, it's not implemented.
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Quiz created successfully!')),
+        const SnackBar(
+          content: Text('Quiz created successfully! (Not saved persistently)'),
+        ),
       );
 
       Navigator.pop(context);
@@ -1242,6 +1185,27 @@ class _QuizCreationScreenState extends State<QuizCreationScreen> {
                     return 'Please enter a category name.';
                   }
                   return null;
+                },
+              ),
+              const SizedBox(height: 20),
+              DropdownButtonFormField<String>(
+                value: _selectedDifficulty,
+                decoration: InputDecoration(
+                  labelText: 'Difficulty',
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+                items: ['easy', 'medium', 'hard'].map((String value) {
+                  return DropdownMenuItem<String>(
+                    value: value,
+                    child: Text(value.toUpperCase()),
+                  );
+                }).toList(),
+                onChanged: (String? newValue) {
+                  setState(() {
+                    _selectedDifficulty = newValue;
+                  });
                 },
               ),
               const SizedBox(height: 20),
