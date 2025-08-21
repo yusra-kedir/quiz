@@ -9,6 +9,86 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:http/http.dart' as http;
 import 'package:just_audio/just_audio.dart';
 import 'package:html_unescape/html_unescape.dart';
+import 'package:confetti/confetti.dart';
+
+// ===== QUIZ API INTEGRATION CLASS =====
+class QuizApi {
+  // Lists of available categories and difficulties for the Open Trivia DB API
+  static const List<String> availableCategories = [
+    'General Knowledge',
+    'Entertainment: Books',
+    'Science & Nature',
+    'Mythology',
+    'History',
+    'Politics',
+    'Art',
+    'Animals',
+    'Vehicles',
+  ];
+
+  static const List<String> availableDifficulties = ['easy', 'medium', 'hard'];
+
+  // Helper method to get the API category code for a given category name
+  static int _getCategoryCode(String categoryName) {
+    switch (categoryName) {
+      case 'General Knowledge':
+        return 9;
+      case 'Entertainment: Books':
+        return 10;
+      case 'Science & Nature':
+        return 17;
+      case 'Mythology':
+        return 20;
+      case 'History':
+        return 23;
+      case 'Politics':
+        return 24;
+      case 'Art':
+        return 25;
+      case 'Animals':
+        return 27;
+      case 'Vehicles':
+        return 28;
+      default:
+        throw Exception('Unknown category');
+    }
+  }
+
+  // Method to fetch questions from the Open Trivia DB API
+  static Future<List<Question>> fetchQuestions({
+    required String categoryName,
+    required String difficulty,
+    int amount = 10,
+  }) async {
+    final categoryCode = _getCategoryCode(categoryName);
+    final url =
+        'https://opentdb.com/api.php?amount=$amount&category=$categoryCode&difficulty=${difficulty.toLowerCase()}&type=multiple';
+
+    try {
+      final response = await http.get(Uri.parse(url));
+
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        if (data['response_code'] == 0) {
+          final List questionsJson = data['results'];
+          return questionsJson.map((q) => Question.fromJson(q)).toList();
+        } else if (data['response_code'] == 1) {
+          // No questions available for the selected parameters
+          return [];
+        } else {
+          throw Exception(
+            'Failed to load questions: API responded with code ${data['response_code']}',
+          );
+        }
+      } else {
+        throw Exception('Failed to load questions: Server error');
+      }
+    } catch (e) {
+      // Catch any network or parsing errors
+      throw Exception('Failed to load questions: $e');
+    }
+  }
+}
 
 // ===== DATA MODELS AND PROVIDERS =====
 class Question {
@@ -99,6 +179,7 @@ class UserProvider with ChangeNotifier {
   bool _isLoggedIn = false;
   bool _isInitialized = false;
   bool _isTeacher = false;
+  int _highestScore = 0;
 
   // Achievement data
   final List<Achievement> _achievements = [
@@ -130,16 +211,17 @@ class UserProvider with ChangeNotifier {
   bool get isLoggedIn => _isLoggedIn;
   bool get isInitialized => _isInitialized;
   bool get isTeacher => _isTeacher;
+  int get highestScore => _highestScore;
   List<Achievement> get achievements => _achievements;
   Map<String, int> get achievementProgress => _achievementProgress;
 
   Future<void> initUser() async {
-    _isInitialized = false;
     final prefs = await SharedPreferences.getInstance();
     _isLoggedIn = prefs.getBool('isLoggedIn') ?? false;
     _currentUserId = prefs.getString('userId') ?? 'guest_user';
     _currentUserName = prefs.getString('userName') ?? 'Guest';
     _isTeacher = prefs.getBool('isTeacher') ?? false;
+    _highestScore = prefs.getInt('highestScore') ?? 0;
 
     // Load achievement progress from SharedPreferences
     final progressString = prefs.getString('achievementProgress') ?? '{}';
@@ -178,17 +260,24 @@ class UserProvider with ChangeNotifier {
     );
   }
 
+  Future<void> _saveHighestScore() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt('highestScore', _highestScore);
+  }
+
   Future<void> login(String userName, {required bool isTeacher}) async {
     final prefs = await SharedPreferences.getInstance();
     _isLoggedIn = true;
     _currentUserId = DateTime.now().millisecondsSinceEpoch.toString();
     _currentUserName = userName;
     _isTeacher = isTeacher;
+    _highestScore = 0; // Reset highest score on new login
 
     await prefs.setBool('isLoggedIn', true);
     await prefs.setString('userId', _currentUserId);
     await prefs.setString('userName', _currentUserName);
     await prefs.setBool('isTeacher', _isTeacher);
+    await prefs.setInt('highestScore', _highestScore);
 
     _leaderboardData.add(
       LeaderboardEntry(
@@ -207,11 +296,13 @@ class UserProvider with ChangeNotifier {
     _currentUserName = 'Guest';
     _score = 0;
     _isTeacher = false;
+    _highestScore = 0; // Clear highest score on logout
     _leaderboardData.removeWhere((entry) => entry.userId == currentUserId);
     await prefs.setBool('isLoggedIn', false);
     await prefs.remove('userId');
     await prefs.remove('userName');
     await prefs.remove('isTeacher');
+    await prefs.remove('highestScore');
     notifyListeners();
   }
 
@@ -227,6 +318,13 @@ class UserProvider with ChangeNotifier {
         score: _score,
       );
     }
+
+    // Check if the current score is a new high score
+    if (_score > _highestScore) {
+      _highestScore = _score;
+      _saveHighestScore(); // Save the new highest score
+    }
+
     notifyListeners();
   }
 
@@ -342,65 +440,20 @@ class SoundProvider with ChangeNotifier {
   }
 }
 
-// ===== QUIZ API SERVICE =====
-class QuizApi {
-  static const String _baseUrl = 'https://opentdb.com/api.php?';
+class QuizProvider with ChangeNotifier {
+  final List<Question> _userQuizzes = [];
 
-  static final Map<String, int> _categories = {
-    'General Knowledge': 9,
-    'Entertainment: Books': 10,
-    'Science & Nature': 17,
-    'Mythology': 20,
-    'History': 23,
-    'Politics': 24,
-    'Art': 25,
-    'Animals': 27,
-    'Vehicles': 28,
-  };
+  List<Question> get userQuizzes => _userQuizzes;
 
-  static final Map<String, String> _difficulties = {
-    'easy': 'easy',
-    'medium': 'medium',
-    'hard': 'hard',
-  };
+  // Add a new quiz to the list of user-created quizzes
+  void addQuiz(Question quiz) {
+    _userQuizzes.add(quiz);
+    notifyListeners();
+  }
 
-  static List<String> get availableCategories => _categories.keys.toList();
-  static List<String> get availableDifficulties => _difficulties.keys.toList();
-
-  static Future<List<Question>> fetchQuestions({
-    required String categoryName,
-    required String difficulty,
-    int amount = 10,
-  }) async {
-    final categoryId = _categories[categoryName];
-    final difficultyParam = _difficulties[difficulty];
-
-    if (categoryId == null || difficultyParam == null) {
-      throw Exception('Invalid category or difficulty selected.');
-    }
-
-    final url = Uri.parse(
-      '${_baseUrl}amount=$amount&category=$categoryId&difficulty=$difficultyParam&type=multiple',
-    );
-
-    try {
-      final response = await http.get(url);
-      if (response.statusCode == 200) {
-        final Map<String, dynamic> data = json.decode(response.body);
-        if (data['response_code'] == 0) {
-          final List<dynamic> results = data['results'];
-          return results.map((json) => Question.fromJson(json)).toList();
-        } else {
-          return [];
-        }
-      } else {
-        throw Exception(
-          'Failed to load questions from API. Status Code: ${response.statusCode}',
-        );
-      }
-    } catch (e) {
-      rethrow;
-    }
+  // Get all unique categories for user-created quizzes
+  List<String> get userQuizCategories {
+    return _userQuizzes.map((q) => q.category).toSet().toList();
   }
 }
 
@@ -412,6 +465,9 @@ void main() {
         ChangeNotifierProvider(create: (_) => UserProvider()..initUser()),
         ChangeNotifierProvider(create: (_) => ThemeProvider()),
         ChangeNotifierProvider(create: (_) => SoundProvider()),
+        ChangeNotifierProvider(
+          create: (_) => QuizProvider(),
+        ), // Added new QuizProvider
       ],
       child: const QuizApp(),
     ),
@@ -424,7 +480,6 @@ class QuizApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final themeProvider = Provider.of<ThemeProvider>(context);
-    final userProvider = Provider.of<UserProvider>(context);
 
     // Define the core color palette.
     final Color primaryColor = themeProvider.primaryColor;
@@ -461,27 +516,124 @@ class QuizApp extends StatelessWidget {
           brightness: Brightness.dark,
         ),
       ),
-      home: userProvider.isInitialized
-          ? (userProvider.isLoggedIn ? const MainScreen() : const AuthScreen())
-          : const SplashScreen(),
+      home: const SplashScreen(),
     );
   }
 }
 
-class SplashScreen extends StatelessWidget {
+class SplashScreen extends StatefulWidget {
   const SplashScreen({super.key});
 
   @override
+  State<SplashScreen> createState() => _SplashScreenState();
+}
+
+class _SplashScreenState extends State<SplashScreen>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _controller;
+  late Animation<double> _scaleAnimation;
+  late Animation<double> _fadeAnimation;
+  late Timer _timer;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(seconds: 1),
+    );
+
+    _scaleAnimation = Tween<double>(
+      begin: 0.0,
+      end: 1.0,
+    ).animate(CurvedAnimation(parent: _controller, curve: Curves.elasticOut));
+
+    _fadeAnimation = Tween<double>(
+      begin: 0.0,
+      end: 1.0,
+    ).animate(CurvedAnimation(parent: _controller, curve: Curves.easeIn));
+
+    _controller.forward();
+
+    // Start a timer to navigate after 3 seconds
+    _timer = Timer(const Duration(seconds: 3), () {
+      _navigateToNextScreen();
+    });
+  }
+
+  void _navigateToNextScreen() {
+    final userProvider = Provider.of<UserProvider>(context, listen: false);
+    if (!userProvider.isInitialized) {
+      userProvider.initUser().then((_) {
+        _performNavigation();
+      });
+    } else {
+      _performNavigation();
+    }
+  }
+
+  void _performNavigation() {
+    final userProvider = Provider.of<UserProvider>(context, listen: false);
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(
+        builder: (context) =>
+            userProvider.isLoggedIn ? const MainScreen() : const AuthScreen(),
+      ),
+    );
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    _timer.cancel();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    return const Scaffold(
-      body: Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            CircularProgressIndicator(),
-            SizedBox(height: 20),
-            Text('Loading Quiz Quest...'),
-          ],
+    final themeProvider = Provider.of<ThemeProvider>(context);
+
+    return Scaffold(
+      body: Container(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            colors: [themeProvider.primaryColor, themeProvider.tertiaryColor],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+          ),
+        ),
+        child: Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              ScaleTransition(
+                scale: _scaleAnimation,
+                child: FadeTransition(
+                  opacity: _fadeAnimation,
+                  child: Icon(
+                    Icons.emoji_events,
+                    size: 150,
+                    color: Colors.white,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 20),
+              FadeTransition(
+                opacity: _fadeAnimation,
+                child: Text(
+                  'Quiz Quest',
+                  style: GoogleFonts.inter(
+                    textStyle: const TextStyle(
+                      fontSize: 48,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.white,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -817,11 +969,12 @@ class CategoryScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // Get unique categories from the QuizApi
-    final List<String> categories = QuizApi.availableCategories;
-
-    // Get the user provider to check the role
     final userProvider = Provider.of<UserProvider>(context);
+    final quizProvider = Provider.of<QuizProvider>(context);
+
+    // Using the static list from the new QuizApi class
+    final List<String> categories = QuizApi.availableCategories;
+    final List<String> userCategories = quizProvider.userQuizCategories;
 
     return Scaffold(
       appBar: AppBar(
@@ -852,10 +1005,47 @@ class CategoryScreen extends StatelessWidget {
                   mainAxisSpacing: 16,
                   childAspectRatio: 1.5,
                 ),
-                itemCount: categories.length,
+                itemCount:
+                    categories.length +
+                    (userCategories.isNotEmpty ? userCategories.length : 0),
                 itemBuilder: (context, index) {
-                  final category = categories.elementAt(index);
-                  return _buildCategoryCard(context, category);
+                  if (index < categories.length) {
+                    final category = categories.elementAt(index);
+                    return _buildCategoryCard(context, category, () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (context) =>
+                              DifficultyScreen(categoryName: category),
+                        ),
+                      );
+                    });
+                  } else {
+                    final userCategory = userCategories.elementAt(
+                      index - categories.length,
+                    );
+                    return _buildCategoryCard(
+                      context,
+                      userCategory,
+                      () {
+                        final quizzesInCategory = quizProvider.userQuizzes
+                            .where((q) => q.category == userCategory)
+                            .toList();
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (context) => QuizScreen(
+                              category: userCategory,
+                              difficulty: 'custom',
+                              questions: quizzesInCategory,
+                            ),
+                          ),
+                        );
+                      },
+                      icon: Icons.person_pin,
+                      isCustom: true,
+                    );
+                  }
                 },
               ),
             ),
@@ -897,7 +1087,13 @@ class CategoryScreen extends StatelessWidget {
     );
   }
 
-  Widget _buildCategoryCard(BuildContext context, String category) {
+  Widget _buildCategoryCard(
+    BuildContext context,
+    String category,
+    VoidCallback onTap, {
+    IconData? icon,
+    bool isCustom = false,
+  }) {
     final Map<String, IconData> categoryIcons = {
       'General Knowledge': Icons.public,
       'Entertainment: Books': Icons.book,
@@ -909,25 +1105,22 @@ class CategoryScreen extends StatelessWidget {
       'Animals': Icons.pets,
       'Vehicles': Icons.electric_car,
     };
-    final icon = categoryIcons[category] ?? Icons.quiz;
+    final selectedIcon = icon ?? categoryIcons[category] ?? Icons.quiz;
 
     return Card(
       elevation: 6,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
       child: InkWell(
-        onTap: () {
-          Navigator.push(
-            context,
-            MaterialPageRoute(
-              builder: (context) => DifficultyScreen(categoryName: category),
-            ),
-          );
-        },
+        onTap: onTap,
         borderRadius: BorderRadius.circular(15),
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(icon, size: 50, color: Theme.of(context).colorScheme.primary),
+            Icon(
+              selectedIcon,
+              size: 50,
+              color: Theme.of(context).colorScheme.primary,
+            ),
             const SizedBox(height: 8),
             Text(
               category,
@@ -938,6 +1131,15 @@ class CategoryScreen extends StatelessWidget {
               ),
               textAlign: TextAlign.center,
             ),
+            if (isCustom)
+              const Text(
+                '(Custom)',
+                style: TextStyle(
+                  fontStyle: FontStyle.italic,
+                  fontSize: 12,
+                  color: Colors.grey,
+                ),
+              ),
           ],
         ),
       ),
@@ -965,6 +1167,7 @@ class _DifficultyScreenState extends State<DifficultyScreen> {
     });
 
     try {
+      // Use the new QuizApi to fetch questions
       final questions = await QuizApi.fetchQuestions(
         categoryName: widget.categoryName,
         difficulty: difficulty,
@@ -1039,7 +1242,9 @@ class _DifficultyScreenState extends State<DifficultyScreen> {
             : _error != null
             ? Center(child: Text(_error!))
             : ListView.builder(
-                itemCount: QuizApi.availableDifficulties.length,
+                itemCount: QuizApi
+                    .availableDifficulties
+                    .length, // Use the static list from QuizApi
                 itemBuilder: (context, index) {
                   final difficulty = QuizApi.availableDifficulties[index];
                   return Card(
@@ -1423,7 +1628,9 @@ class _QuizState extends State<Quiz> with TickerProviderStateMixin {
               },
             ),
           ),
-          if (widget.isAnswered && explanation != null)
+          if (widget.isAnswered &&
+              explanation != null &&
+              explanation.isNotEmpty)
             FadeTransition(
               opacity: _answerController,
               child: Padding(
@@ -1449,7 +1656,7 @@ class _QuizState extends State<Quiz> with TickerProviderStateMixin {
   }
 }
 
-class ResultScreen extends StatelessWidget {
+class ResultScreen extends StatefulWidget {
   final int score;
   final int totalQuestions;
   const ResultScreen({
@@ -1458,10 +1665,47 @@ class ResultScreen extends StatelessWidget {
     required this.totalQuestions,
   });
 
+  @override
+  State<ResultScreen> createState() => _ResultScreenState();
+}
+
+class _ResultScreenState extends State<ResultScreen>
+    with SingleTickerProviderStateMixin {
+  late ConfettiController _confettiController;
+  late bool isNewHighScore;
+
+  @override
+  void initState() {
+    super.initState();
+    _confettiController = ConfettiController(
+      duration: const Duration(seconds: 3),
+    );
+
+    // Check for a new high score
+    final userProvider = Provider.of<UserProvider>(context, listen: false);
+    userProvider.updateScore(widget.score); // Update the score first
+    isNewHighScore =
+        widget.score >
+        userProvider.highestScore; // Now check if it's a new high score
+
+    // Update achievements
+    _updateAchievements(userProvider);
+
+    if (isNewHighScore) {
+      _confettiController.play();
+    }
+  }
+
+  @override
+  void dispose() {
+    _confettiController.dispose();
+    super.dispose();
+  }
+
   String get _getRewardType {
-    if (score == totalQuestions) {
+    if (widget.score == widget.totalQuestions) {
       return 'master';
-    } else if (score >= totalQuestions / 2) {
+    } else if (widget.score >= widget.totalQuestions / 2) {
       return 'good';
     } else {
       return 'beginner';
@@ -1469,77 +1713,114 @@ class ResultScreen extends StatelessWidget {
   }
 
   // Method to check and update achievement progress
-  void _updateAchievements(BuildContext context) {
-    final userProvider = Provider.of<UserProvider>(context, listen: false);
-
+  void _updateAchievements(UserProvider userProvider) {
     // Increment 'Quiz Whiz' progress by 1
     userProvider.updateAchievementProgress('quiz_whiz', 1);
 
     // If a perfect score is achieved, update 'Perfectionist' progress to 1
-    if (score == totalQuestions) {
+    if (widget.score == widget.totalQuestions) {
       userProvider.updateAchievementProgress('perfectionist', 1);
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    _updateAchievements(context); // Call the achievement update logic
-    Provider.of<UserProvider>(context, listen: false).updateScore(score);
     final String rewardType = _getRewardType;
+
     return Scaffold(
-      body: Container(
-        decoration: BoxDecoration(
-          gradient: LinearGradient(
-            colors: [
-              Theme.of(context).colorScheme.primary,
-              Theme.of(context).colorScheme.tertiary,
-            ],
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-          ),
-        ),
-        child: Center(
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(
-                rewardType == 'master'
-                    ? Icons.emoji_events
-                    : Icons.check_circle,
-                size: 100,
-                color: Colors.white,
+      body: Stack(
+        children: [
+          // Background gradient
+          Container(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                colors: [
+                  Theme.of(context).colorScheme.primary,
+                  Theme.of(context).colorScheme.tertiary,
+                ],
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
               ),
-              const SizedBox(height: 20),
-              Text(
-                'You scored $score out of $totalQuestions!',
-                textAlign: TextAlign.center,
-                style: const TextStyle(
-                  fontSize: 28,
-                  fontWeight: FontWeight.bold,
-                  color: Colors.white,
-                ),
-              ),
-              const SizedBox(height: 40),
-              ElevatedButton(
-                onPressed: () {
-                  Navigator.popUntil(context, (route) => route.isFirst);
-                },
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.white,
-                  foregroundColor: Theme.of(context).colorScheme.primary,
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(30),
+            ),
+            child: Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  if (isNewHighScore)
+                    Text(
+                      'NEW HIGH SCORE!',
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                        fontSize: 24,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.white,
+                      ),
+                    ),
+                  Icon(
+                    rewardType == 'master'
+                        ? Icons.emoji_events
+                        : Icons.check_circle,
+                    size: 100,
+                    color: Colors.white,
                   ),
-                  elevation: 5,
-                ),
-                child: const Text(
-                  'Go Home',
-                  style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-                ),
+                  const SizedBox(height: 20),
+                  Text(
+                    'You scored ${widget.score} out of ${widget.totalQuestions}!',
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                      fontSize: 28,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.white,
+                    ),
+                  ),
+                  const SizedBox(height: 40),
+                  ElevatedButton(
+                    onPressed: () {
+                      Navigator.popUntil(context, (route) => route.isFirst);
+                    },
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.white,
+                      foregroundColor: Theme.of(context).colorScheme.primary,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(30),
+                      ),
+                      elevation: 5,
+                    ),
+                    child: const Text(
+                      'Go Home',
+                      style: TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                ],
               ),
-            ],
+            ),
           ),
-        ),
+
+          // Confetti animation widget
+          Align(
+            alignment: Alignment.topCenter,
+            child: ConfettiWidget(
+              confettiController: _confettiController,
+              blastDirection: pi / 2, // Blast straight down
+              maxBlastForce: 20,
+              minBlastForce: 8,
+              emissionFrequency: 0.05,
+              numberOfParticles: 50,
+              gravity: 0.1,
+              shouldLoop: false,
+              colors: [
+                Theme.of(context).colorScheme.primary,
+                Theme.of(context).colorScheme.tertiary,
+                Colors.yellow,
+                Colors.green,
+                Colors.blue,
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -1765,6 +2046,43 @@ class LeaderboardScreen extends StatelessWidget {
               style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
             ),
             const SizedBox(height: 10),
+            // Display high score card at the top of the leaderboard section
+            if (userProvider.highestScore > 0)
+              Card(
+                elevation: 8,
+                color: Colors.amber.shade200,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(15),
+                ),
+                child: ListTile(
+                  contentPadding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 12,
+                  ),
+                  leading: const Icon(
+                    Icons.emoji_events,
+                    color: Colors.amber,
+                    size: 40,
+                  ),
+                  title: const Text(
+                    'Your Best Score',
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 18,
+                      color: Colors.black87,
+                    ),
+                  ),
+                  trailing: Text(
+                    '${userProvider.highestScore}',
+                    style: const TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 24,
+                      color: Colors.black87,
+                    ),
+                  ),
+                ),
+              ),
+            const SizedBox(height: 10),
             if (leaderboardData.isEmpty)
               const Center(child: Text('No scores to display yet.'))
             else
@@ -1936,13 +2254,47 @@ class _QuizCreationScreenState extends State<QuizCreationScreen> {
 
   void _submitQuiz() {
     if (_formKey.currentState!.validate()) {
-      // This part would ideally save to a database. For this example, it's not implemented.
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Quiz created successfully! (Not saved persistently)'),
-        ),
+      final quizProvider = Provider.of<QuizProvider>(context, listen: false);
+
+      final List<Answer> answers = _answerControllers.asMap().entries.map((
+        entry,
+      ) {
+        final index = entry.key;
+        final controller = entry.value;
+        return Answer(text: controller.text, isCorrect: _isCorrect[index]);
+      }).toList();
+
+      final newQuiz = Question(
+        questionText: _questionController.text,
+        answers: answers,
+        category: _categoryController.text,
+        difficulty: _selectedDifficulty!,
+        explanation: _explanationController.text,
       );
-      Navigator.pop(context);
+
+      quizProvider.addQuiz(newQuiz);
+
+      // Show confirmation dialog
+      showDialog(
+        context: context,
+        builder: (BuildContext context) {
+          return AlertDialog(
+            title: const Text('Quiz Created!'),
+            content: const Text(
+              'Your new quiz has been added to "My Quizzes" and is ready to play.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () {
+                  Navigator.of(context).pop();
+                  Navigator.of(context).pop();
+                },
+                child: const Text('OK'),
+              ),
+            ],
+          );
+        },
+      );
     }
   }
 
