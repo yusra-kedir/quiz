@@ -1,45 +1,57 @@
 // main.dart
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:http/http.dart' as http;
+import 'package:just_audio/just_audio.dart';
+import 'package:html_unescape/html_unescape.dart';
 
 // ===== DATA MODELS AND PROVIDERS =====
 class Question {
   final String questionText;
   final List<Answer> answers;
-  final String? explanation;
-  final String difficulty;
   final String category;
+  final String difficulty;
+  final String? explanation;
 
   Question({
     required this.questionText,
     required this.answers,
-    this.explanation,
-    required this.difficulty,
     required this.category,
+    required this.difficulty,
+    this.explanation,
   });
 
   // Constructor to create a Question from a JSON map
-  factory Question.fromJson(
-    Map<String, dynamic> json,
-    String difficulty,
-    String category,
-  ) {
-    var answersFromJson = json['answers'] as List;
-    List<Answer> answersList = answersFromJson
-        .map((i) => Answer.fromJson(i))
+  factory Question.fromJson(Map<String, dynamic> json) {
+    final unescape = HtmlUnescape();
+    final String decodedQuestion = unescape.convert(json['question']);
+    final String decodedCorrectAnswer = unescape.convert(
+      json['correct_answer'],
+    );
+    final List<String> incorrectAnswers = (json['incorrect_answers'] as List)
+        .map((answer) => unescape.convert(answer.toString()))
         .toList();
 
+    List<Answer> answersList = [];
+    answersList.add(Answer(text: decodedCorrectAnswer, isCorrect: true));
+    for (var incorrect in incorrectAnswers) {
+      answersList.add(Answer(text: incorrect, isCorrect: false));
+    }
+
+    // Shuffle the answers to randomize their order
+    answersList.shuffle();
+
     return Question(
-      questionText: json['questionText'],
+      questionText: decodedQuestion,
       answers: answersList,
-      explanation: json['explanation'],
-      difficulty: difficulty,
-      category: category,
+      category: json['category'],
+      difficulty: json['difficulty'],
+      explanation: null, // Open Trivia DB does not provide explanations
     );
   }
 }
@@ -48,11 +60,6 @@ class Answer {
   final String text;
   final bool isCorrect;
   Answer({required this.text, required this.isCorrect});
-
-  // Constructor to create an Answer from a JSON map
-  factory Answer.fromJson(Map<String, dynamic> json) {
-    return Answer(text: json['text'], isCorrect: json['isCorrect']);
-  }
 }
 
 class LeaderboardEntry {
@@ -67,6 +74,23 @@ class LeaderboardEntry {
   });
 }
 
+// Data model for achievements
+class Achievement {
+  final String id;
+  final String title;
+  final String description;
+  final int targetValue;
+  IconData icon;
+
+  Achievement({
+    required this.id,
+    required this.title,
+    required this.description,
+    required this.targetValue,
+    required this.icon,
+  });
+}
+
 class UserProvider with ChangeNotifier {
   String _currentUserId = '';
   String _currentUserName = 'Guest';
@@ -74,7 +98,26 @@ class UserProvider with ChangeNotifier {
   List<LeaderboardEntry> _leaderboardData = [];
   bool _isLoggedIn = false;
   bool _isInitialized = false;
-  bool _isTeacher = false; // Added property for teacher role
+  bool _isTeacher = false;
+
+  // Achievement data
+  final List<Achievement> _achievements = [
+    Achievement(
+      id: 'quiz_whiz',
+      title: 'Quiz Whiz',
+      description: 'Complete 5 quizzes',
+      targetValue: 5,
+      icon: Icons.auto_stories,
+    ),
+    Achievement(
+      id: 'perfectionist',
+      title: 'Perfectionist',
+      description: 'Get a perfect score (10/10)',
+      targetValue: 1,
+      icon: Icons.star_rate,
+    ),
+  ];
+  Map<String, int> _achievementProgress = {};
 
   String get currentUserId => _currentUserId;
   String get currentUserName => _currentUserName;
@@ -86,7 +129,9 @@ class UserProvider with ChangeNotifier {
 
   bool get isLoggedIn => _isLoggedIn;
   bool get isInitialized => _isInitialized;
-  bool get isTeacher => _isTeacher; // Getter for the teacher role
+  bool get isTeacher => _isTeacher;
+  List<Achievement> get achievements => _achievements;
+  Map<String, int> get achievementProgress => _achievementProgress;
 
   Future<void> initUser() async {
     _isInitialized = false;
@@ -94,10 +139,22 @@ class UserProvider with ChangeNotifier {
     _isLoggedIn = prefs.getBool('isLoggedIn') ?? false;
     _currentUserId = prefs.getString('userId') ?? 'guest_user';
     _currentUserName = prefs.getString('userName') ?? 'Guest';
-    _isTeacher = prefs.getBool('isTeacher') ?? false; // Load teacher role
+    _isTeacher = prefs.getBool('isTeacher') ?? false;
+
+    // Load achievement progress from SharedPreferences
+    final progressString = prefs.getString('achievementProgress') ?? '{}';
+    try {
+      _achievementProgress = Map<String, int>.from(jsonDecode(progressString));
+    } catch (e) {
+      _achievementProgress = {};
+    }
+
+    // Ensure all achievements are in the progress map
+    for (var achievement in _achievements) {
+      _achievementProgress.putIfAbsent(achievement.id, () => 0);
+    }
 
     if (_isLoggedIn) {
-      // Simulate loading initial leaderboard data for a logged-in user
       _leaderboardData = [
         LeaderboardEntry(userId: 'user1', name: 'Alice', score: 120),
         LeaderboardEntry(userId: 'user2', name: 'Bob', score: 95),
@@ -113,6 +170,14 @@ class UserProvider with ChangeNotifier {
     notifyListeners();
   }
 
+  Future<void> _saveAchievementProgress() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+      'achievementProgress',
+      jsonEncode(_achievementProgress),
+    );
+  }
+
   Future<void> login(String userName, {required bool isTeacher}) async {
     final prefs = await SharedPreferences.getInstance();
     _isLoggedIn = true;
@@ -123,9 +188,8 @@ class UserProvider with ChangeNotifier {
     await prefs.setBool('isLoggedIn', true);
     await prefs.setString('userId', _currentUserId);
     await prefs.setString('userName', _currentUserName);
-    await prefs.setBool('isTeacher', _isTeacher); // Save teacher role
+    await prefs.setBool('isTeacher', _isTeacher);
 
-    // Add the new user to the simulated leaderboard
     _leaderboardData.add(
       LeaderboardEntry(
         userId: _currentUserId,
@@ -142,18 +206,17 @@ class UserProvider with ChangeNotifier {
     _currentUserId = 'guest_user';
     _currentUserName = 'Guest';
     _score = 0;
-    _isTeacher = false; // Reset teacher role on logout
+    _isTeacher = false;
     _leaderboardData.removeWhere((entry) => entry.userId == currentUserId);
     await prefs.setBool('isLoggedIn', false);
     await prefs.remove('userId');
     await prefs.remove('userName');
-    await prefs.remove('isTeacher'); // Remove teacher role from storage
+    await prefs.remove('isTeacher');
     notifyListeners();
   }
 
   void updateScore(int score) {
     _score = score;
-    // Update the score on the leaderboard
     final index = _leaderboardData.indexWhere(
       (e) => e.userId == _currentUserId,
     );
@@ -184,11 +247,29 @@ class UserProvider with ChangeNotifier {
       prefs.setString('userName', newName);
     });
   }
+
+  // Method to update achievement progress
+  void updateAchievementProgress(String achievementId, int value) {
+    if (_achievementProgress.containsKey(achievementId)) {
+      final currentProgress = _achievementProgress[achievementId]!;
+      _achievementProgress[achievementId] = min(
+        currentProgress + value,
+        _achievements.firstWhere((a) => a.id == achievementId).targetValue,
+      );
+      _saveAchievementProgress();
+      notifyListeners();
+    }
+  }
 }
 
 class ThemeProvider with ChangeNotifier {
   ThemeMode _themeMode = ThemeMode.system;
+  Color _primaryColor = const Color(0xFF009688);
+  Color _tertiaryColor = const Color(0xFFE91E63);
+
   ThemeMode get themeMode => _themeMode;
+  Color get primaryColor => _primaryColor;
+  Color get tertiaryColor => _tertiaryColor;
 
   void toggleTheme() {
     _themeMode = _themeMode == ThemeMode.light
@@ -196,184 +277,132 @@ class ThemeProvider with ChangeNotifier {
         : ThemeMode.light;
     notifyListeners();
   }
+
+  void setPrimaryColor(Color color) {
+    _primaryColor = color;
+    notifyListeners();
+  }
+
+  void setTertiaryColor(Color color) {
+    _tertiaryColor = color;
+    notifyListeners();
+  }
 }
 
-// ===== QUIZ DATA =====
-const List<Map<String, Object>> dummyQuestions = [
-  // General Knowledge
-  {
-    'questionText': 'What is the capital of France?',
-    'answers': [
-      {'text': 'Berlin', 'isCorrect': false},
-      {'text': 'Madrid', 'isCorrect': false},
-      {'text': 'Paris', 'isCorrect': true},
-      {'text': 'Rome', 'isCorrect': false},
-    ],
-    'explanation': 'Paris is the capital and most populous city of France.',
-    'difficulty': 'easy',
-    'category': 'General Knowledge',
-  },
-  {
-    'questionText': 'Which planet is known as the "Red Planet"?',
-    'answers': [
-      {'text': 'Earth', 'isCorrect': false},
-      {'text': 'Mars', 'isCorrect': true},
-      {'text': 'Jupiter', 'isCorrect': false},
-      {'text': 'Venus', 'isCorrect': false},
-    ],
-    'explanation':
-        'Mars is often called the Red Planet because of its reddish appearance.',
-    'difficulty': 'easy',
-    'category': 'General Knowledge',
-  },
-  {
-    'questionText': 'What is the largest ocean on Earth?',
-    'answers': [
-      {'text': 'Atlantic Ocean', 'isCorrect': false},
-      {'text': 'Indian Ocean', 'isCorrect': false},
-      {'text': 'Arctic Ocean', 'isCorrect': false},
-      {'text': 'Pacific Ocean', 'isCorrect': true},
-    ],
-    'explanation':
-        'The Pacific Ocean is the largest and deepest of Earth\'s five oceans.',
-    'difficulty': 'medium',
-    'category': 'General Knowledge',
-  },
-  {
-    'questionText': 'Who wrote "To Kill a Mockingbird"?',
-    'answers': [
-      {'text': 'J.K. Rowling', 'isCorrect': false},
-      {'text': 'Harper Lee', 'isCorrect': true},
-      {'text': 'Stephen King', 'isCorrect': false},
-      {'text': 'Mark Twain', 'isCorrect': false},
-    ],
-    'explanation':
-        'Harper Lee\'s "To Kill a Mockingbird" won the Pulitzer Prize in 1961.',
-    'difficulty': 'hard',
-    'category': 'General Knowledge',
-  },
+class SoundProvider with ChangeNotifier {
+  bool _isSoundEnabled = true;
+  final AudioPlayer _player = AudioPlayer();
 
-  // Physics
-  {
-    'questionText': 'What is the SI unit of force?',
-    'answers': [
-      {'text': 'Joule', 'isCorrect': false},
-      {'text': 'Newton', 'isCorrect': true},
-      {'text': 'Watt', 'isCorrect': false},
-      {'text': 'Pascal', 'isCorrect': false},
-    ],
-    'explanation':
-        'The SI unit of force is the Newton, named after Sir Isaac Newton.',
-    'difficulty': 'easy',
-    'category': 'Physics',
-  },
-  {
-    'questionText': 'What is the formula for kinetic energy?',
-    'answers': [
-      {'text': 'E = mc²', 'isCorrect': false},
-      {'text': 'E = ½mv²', 'isCorrect': true},
-      {'text': 'F = ma', 'isCorrect': false},
-      {'text': 'P = IV', 'isCorrect': false},
-    ],
-    'explanation':
-        'Kinetic energy is the energy of motion, calculated as half an object\'s mass multiplied by the square of its velocity.',
-    'difficulty': 'medium',
-    'category': 'Physics',
-  },
-  {
-    'questionText': 'Which scientist developed the theory of relativity?',
-    'answers': [
-      {'text': 'Isaac Newton', 'isCorrect': false},
-      {'text': 'Galileo Galilei', 'isCorrect': false},
-      {'text': 'Albert Einstein', 'isCorrect': true},
-      {'text': 'Nikola Tesla', 'isCorrect': false},
-    ],
-    'explanation':
-        'Albert Einstein is best known for his theories of special and general relativity.',
-    'difficulty': 'hard',
-    'category': 'Physics',
-  },
+  bool get isSoundEnabled => _isSoundEnabled;
 
-  // Maths
-  {
-    'questionText': 'What is the value of pi to two decimal places?',
-    'answers': [
-      {'text': '3.14', 'isCorrect': true},
-      {'text': '3.16', 'isCorrect': false},
-      {'text': '3.15', 'isCorrect': false},
-      {'text': '3.13', 'isCorrect': false},
-    ],
-    'explanation': 'The value of pi (π) is approximately 3.14159...',
-    'difficulty': 'easy',
-    'category': 'Maths',
-  },
-  {
-    'questionText': 'What is the square root of 144?',
-    'answers': [
-      {'text': '10', 'isCorrect': false},
-      {'text': '11', 'isCorrect': false},
-      {'text': '12', 'isCorrect': true},
-      {'text': '13', 'isCorrect': false},
-    ],
-    'explanation':
-        'The square root of 144 is 12, as 12 multiplied by 12 equals 144.',
-    'difficulty': 'medium',
-    'category': 'Maths',
-  },
-  {
-    'questionText':
-        'What is the next number in the Fibonacci sequence: 0, 1, 1, 2, 3, 5, 8, ...?',
-    'answers': [
-      {'text': '9', 'isCorrect': false},
-      {'text': '11', 'isCorrect': false},
-      {'text': '12', 'isCorrect': false},
-      {'text': '13', 'isCorrect': true},
-    ],
-    'explanation':
-        'In the Fibonacci sequence, each number is the sum of the two preceding ones. 5 + 8 = 13.',
-    'difficulty': 'hard',
-    'category': 'Maths',
-  },
+  SoundProvider() {
+    _loadSoundSetting();
+  }
 
-  // Chemistry
-  {
-    'questionText': 'What is the chemical symbol for gold?',
-    'answers': [
-      {'text': 'Ag', 'isCorrect': false},
-      {'text': 'Au', 'isCorrect': true},
-      {'text': 'Fe', 'isCorrect': false},
-      {'text': 'Pb', 'isCorrect': false},
-    ],
-    'explanation': 'The chemical symbol Au comes from the Latin word "aurum".',
-    'difficulty': 'easy',
-    'category': 'Chemistry',
-  },
-  {
-    'questionText': 'What is the most abundant gas in the Earth\'s atmosphere?',
-    'answers': [
-      {'text': 'Oxygen', 'isCorrect': false},
-      {'text': 'Carbon Dioxide', 'isCorrect': false},
-      {'text': 'Hydrogen', 'isCorrect': false},
-      {'text': 'Nitrogen', 'isCorrect': true},
-    ],
-    'explanation': 'Nitrogen makes up about 78% of the Earth\'s atmosphere.',
-    'difficulty': 'medium',
-    'category': 'Chemistry',
-  },
-  {
-    'questionText': 'What is the pH of a neutral solution?',
-    'answers': [
-      {'text': '0', 'isCorrect': false},
-      {'text': '7', 'isCorrect': true},
-      {'text': '14', 'isCorrect': false},
-      {'text': '8', 'isCorrect': false},
-    ],
-    'explanation':
-        'A pH of 7 is considered neutral. Below 7 is acidic, and above 7 is basic.',
-    'difficulty': 'hard',
-    'category': 'Chemistry',
-  },
-];
+  void _loadSoundSetting() async {
+    final prefs = await SharedPreferences.getInstance();
+    _isSoundEnabled = prefs.getBool('isSoundEnabled') ?? true;
+    notifyListeners();
+  }
+
+  void toggleSound() {
+    _isSoundEnabled = !_isSoundEnabled;
+    SharedPreferences.getInstance().then((prefs) {
+      prefs.setBool('isSoundEnabled', _isSoundEnabled);
+    });
+    notifyListeners();
+  }
+
+  void playCorrectSound() async {
+    if (_isSoundEnabled) {
+      try {
+        await _player.setAsset('assets/correct.mp3');
+        _player.play();
+      } catch (e) {
+        // Handle error loading sound
+      }
+    }
+  }
+
+  void playIncorrectSound() async {
+    if (_isSoundEnabled) {
+      try {
+        await _player.setAsset('assets/incorrect.mp3');
+        _player.play();
+      } catch (e) {
+        // Handle error loading sound
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    _player.dispose();
+    super.dispose();
+  }
+}
+
+// ===== QUIZ API SERVICE =====
+class QuizApi {
+  static const String _baseUrl = 'https://opentdb.com/api.php?';
+
+  static final Map<String, int> _categories = {
+    'General Knowledge': 9,
+    'Entertainment: Books': 10,
+    'Science & Nature': 17,
+    'Mythology': 20,
+    'History': 23,
+    'Politics': 24,
+    'Art': 25,
+    'Animals': 27,
+    'Vehicles': 28,
+  };
+
+  static final Map<String, String> _difficulties = {
+    'easy': 'easy',
+    'medium': 'medium',
+    'hard': 'hard',
+  };
+
+  static List<String> get availableCategories => _categories.keys.toList();
+  static List<String> get availableDifficulties => _difficulties.keys.toList();
+
+  static Future<List<Question>> fetchQuestions({
+    required String categoryName,
+    required String difficulty,
+    int amount = 10,
+  }) async {
+    final categoryId = _categories[categoryName];
+    final difficultyParam = _difficulties[difficulty];
+
+    if (categoryId == null || difficultyParam == null) {
+      throw Exception('Invalid category or difficulty selected.');
+    }
+
+    final url = Uri.parse(
+      '${_baseUrl}amount=$amount&category=$categoryId&difficulty=$difficultyParam&type=multiple',
+    );
+
+    try {
+      final response = await http.get(url);
+      if (response.statusCode == 200) {
+        final Map<String, dynamic> data = json.decode(response.body);
+        if (data['response_code'] == 0) {
+          final List<dynamic> results = data['results'];
+          return results.map((json) => Question.fromJson(json)).toList();
+        } else {
+          return [];
+        }
+      } else {
+        throw Exception(
+          'Failed to load questions from API. Status Code: ${response.statusCode}',
+        );
+      }
+    } catch (e) {
+      rethrow;
+    }
+  }
+}
 
 // ===== MAIN APP WIDGET =====
 void main() {
@@ -382,6 +411,7 @@ void main() {
       providers: [
         ChangeNotifierProvider(create: (_) => UserProvider()..initUser()),
         ChangeNotifierProvider(create: (_) => ThemeProvider()),
+        ChangeNotifierProvider(create: (_) => SoundProvider()),
       ],
       child: const QuizApp(),
     ),
@@ -397,8 +427,8 @@ class QuizApp extends StatelessWidget {
     final userProvider = Provider.of<UserProvider>(context);
 
     // Define the core color palette.
-    const Color primaryTeal = Color(0xFF009688);
-    const Color accentPink = Color(0xFFE91E63);
+    final Color primaryColor = themeProvider.primaryColor;
+    final Color tertiaryColor = themeProvider.tertiaryColor;
     const Color lightBackground = Color(0xFFF5F5F5);
     const Color darkBackground = Color(0xFF1E1E1E);
 
@@ -410,11 +440,11 @@ class QuizApp extends StatelessWidget {
         useMaterial3: true,
         fontFamily: GoogleFonts.inter().fontFamily,
         colorScheme: ColorScheme.fromSeed(
-          seedColor: primaryTeal,
-          primary: primaryTeal,
+          seedColor: primaryColor,
+          primary: primaryColor,
           onPrimary: Colors.white,
           secondary: lightBackground,
-          tertiary: accentPink,
+          tertiary: tertiaryColor,
           brightness: Brightness.light,
         ),
       ),
@@ -422,13 +452,12 @@ class QuizApp extends StatelessWidget {
         useMaterial3: true,
         fontFamily: GoogleFonts.inter().fontFamily,
         colorScheme: ColorScheme.fromSeed(
-          seedColor:
-              accentPink, // Use accent as seed for a different dark palette feel
-          primary: primaryTeal,
+          seedColor: tertiaryColor,
+          primary: primaryColor,
           onPrimary: Colors.white,
           secondary: Colors.grey.shade800,
           surface: darkBackground,
-          tertiary: accentPink,
+          tertiary: tertiaryColor,
           brightness: Brightness.dark,
         ),
       ),
@@ -497,6 +526,7 @@ class _MainScreenState extends State<MainScreen> {
   @override
   Widget build(BuildContext context) {
     final userProvider = Provider.of<UserProvider>(context);
+    final themeProvider = Provider.of<ThemeProvider>(context);
 
     return Scaffold(
       appBar: AppBar(
@@ -515,6 +545,18 @@ class _MainScreenState extends State<MainScreen> {
           ),
         ),
         foregroundColor: Colors.white,
+        actions: [
+          IconButton(
+            icon: Icon(
+              themeProvider.themeMode == ThemeMode.dark
+                  ? Icons.light_mode
+                  : Icons.dark_mode,
+            ),
+            onPressed: () {
+              themeProvider.toggleTheme();
+            },
+          ),
+        ],
       ),
       drawer: Drawer(
         child: ListView(
@@ -742,12 +784,12 @@ class WelcomeScreen extends StatelessWidget {
             mainAxisAlignment: MainAxisAlignment.center,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              const Hero(
+              Hero(
                 tag: 'logo',
                 child: Icon(
                   Icons.emoji_events,
                   size: 150,
-                  color: Color(0xFFE91E63),
+                  color: Theme.of(context).colorScheme.tertiary,
                 ),
               ),
               const SizedBox(height: 20),
@@ -775,10 +817,8 @@ class CategoryScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // Get unique categories from the dummy data
-    final Set<String> categories = dummyQuestions
-        .map((q) => q['category'] as String)
-        .toSet();
+    // Get unique categories from the QuizApi
+    final List<String> categories = QuizApi.availableCategories;
 
     // Get the user provider to check the role
     final userProvider = Provider.of<UserProvider>(context);
@@ -860,9 +900,14 @@ class CategoryScreen extends StatelessWidget {
   Widget _buildCategoryCard(BuildContext context, String category) {
     final Map<String, IconData> categoryIcons = {
       'General Knowledge': Icons.public,
-      'Physics': Icons.rocket_launch,
-      'Maths': Icons.calculate,
-      'Chemistry': Icons.science,
+      'Entertainment: Books': Icons.book,
+      'Science & Nature': Icons.rocket_launch,
+      'Mythology': Icons.shield_moon,
+      'History': Icons.museum,
+      'Politics': Icons.gavel,
+      'Art': Icons.palette,
+      'Animals': Icons.pets,
+      'Vehicles': Icons.electric_car,
     };
     final icon = categoryIcons[category] ?? Icons.quiz;
 
@@ -874,7 +919,7 @@ class CategoryScreen extends StatelessWidget {
           Navigator.push(
             context,
             MaterialPageRoute(
-              builder: (context) => DifficultyScreen(category: category),
+              builder: (context) => DifficultyScreen(categoryName: category),
             ),
           );
         },
@@ -900,17 +945,79 @@ class CategoryScreen extends StatelessWidget {
   }
 }
 
-class DifficultyScreen extends StatelessWidget {
-  final String category;
-  const DifficultyScreen({super.key, required this.category});
+class DifficultyScreen extends StatefulWidget {
+  final String categoryName;
+  const DifficultyScreen({super.key, required this.categoryName});
+
+  @override
+  State<DifficultyScreen> createState() => _DifficultyScreenState();
+}
+
+class _DifficultyScreenState extends State<DifficultyScreen> {
+  List<Question>? _questions;
+  bool _isLoading = false;
+  String? _error;
+
+  Future<void> _fetchQuestions(String difficulty) async {
+    setState(() {
+      _isLoading = true;
+      _error = null;
+    });
+
+    try {
+      final questions = await QuizApi.fetchQuestions(
+        categoryName: widget.categoryName,
+        difficulty: difficulty,
+      );
+      if (questions.isNotEmpty) {
+        setState(() {
+          _questions = questions;
+        });
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (context) => QuizScreen(
+              category: widget.categoryName,
+              difficulty: difficulty,
+              questions: _questions!,
+            ),
+          ),
+        );
+      } else {
+        setState(() {
+          _error =
+              'No questions found for this difficulty. Please try another.';
+        });
+      }
+    } catch (e) {
+      setState(() {
+        _error = 'Failed to load quiz. Please try again.';
+      });
+    } finally {
+      setState(() {
+        _isLoading = false;
+      });
+    }
+  }
+
+  Color _getDifficultyColor(String difficulty) {
+    switch (difficulty.toLowerCase()) {
+      case 'easy':
+        return Colors.green;
+      case 'medium':
+        return Colors.orange;
+      case 'hard':
+        return Colors.red;
+      default:
+        return Colors.grey;
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
-    final difficulties = ['easy', 'medium', 'hard'];
-
     return Scaffold(
       appBar: AppBar(
-        title: Text('$category Quiz'),
+        title: Text('${widget.categoryName} Quiz'),
         flexibleSpace: Container(
           decoration: BoxDecoration(
             gradient: LinearGradient(
@@ -927,93 +1034,46 @@ class DifficultyScreen extends StatelessWidget {
       ),
       body: Padding(
         padding: const EdgeInsets.all(16.0),
-        child: Column(
-          children: difficulties.map((difficulty) {
-            final questions = dummyQuestions
-                .where(
-                  (q) =>
-                      q['category'] == category &&
-                      q['difficulty'] == difficulty,
-                )
-                .toList();
-
-            final List<Question> quizQuestions = questions.map((q) {
-              return Question(
-                questionText: q['questionText'] as String,
-                answers: (q['answers'] as List)
-                    .map(
-                      (a) => Answer(
-                        text: a['text'] as String,
-                        isCorrect: a['isCorrect'] as bool,
-                      ),
-                    )
-                    .toList(),
-                explanation: q['explanation'] as String?,
-                difficulty: q['difficulty'] as String,
-                category: q['category'] as String,
-              );
-            }).toList();
-
-            if (questions.isEmpty) {
-              return Container(); // Don't show card if no questions exist for this difficulty
-            }
-
-            return Card(
-              elevation: 6,
-              margin: const EdgeInsets.symmetric(vertical: 8.0),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(15),
-              ),
-              child: Container(
-                decoration: BoxDecoration(
-                  color: _getDifficultyColor(difficulty).withOpacity(0.1),
-                  borderRadius: BorderRadius.circular(15),
-                ),
-                child: ListTile(
-                  contentPadding: const EdgeInsets.all(16.0),
-                  title: Text(
-                    difficulty.toUpperCase(),
-                    style: TextStyle(
-                      color: _getDifficultyColor(difficulty),
-                      fontWeight: FontWeight.bold,
+        child: _isLoading
+            ? const Center(child: CircularProgressIndicator())
+            : _error != null
+            ? Center(child: Text(_error!))
+            : ListView.builder(
+                itemCount: QuizApi.availableDifficulties.length,
+                itemBuilder: (context, index) {
+                  final difficulty = QuizApi.availableDifficulties[index];
+                  return Card(
+                    elevation: 6,
+                    margin: const EdgeInsets.symmetric(vertical: 8.0),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(15),
                     ),
-                  ),
-                  trailing: Icon(
-                    Icons.arrow_forward_ios,
-                    color: _getDifficultyColor(difficulty),
-                  ),
-                  onTap: () {
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (context) => QuizScreen(
-                          category: category,
-                          difficulty: difficulty,
-                          questions: quizQuestions,
-                        ),
+                    child: Container(
+                      decoration: BoxDecoration(
+                        color: _getDifficultyColor(difficulty).withOpacity(0.1),
+                        borderRadius: BorderRadius.circular(15),
                       ),
-                    );
-                  },
-                ),
+                      child: ListTile(
+                        contentPadding: const EdgeInsets.all(16.0),
+                        title: Text(
+                          difficulty.toUpperCase(),
+                          style: TextStyle(
+                            color: _getDifficultyColor(difficulty),
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        trailing: Icon(
+                          Icons.arrow_forward_ios,
+                          color: _getDifficultyColor(difficulty),
+                        ),
+                        onTap: () => _fetchQuestions(difficulty),
+                      ),
+                    ),
+                  );
+                },
               ),
-            );
-          }).toList(),
-        ),
       ),
     );
-  }
-
-  Color _getDifficultyColor(String difficulty) {
-    switch (difficulty.toLowerCase()) {
-      case 'easy':
-        return Colors.green;
-      case 'medium':
-        return Colors.orange;
-      case 'hard':
-        return Colors.red;
-      default:
-        return Colors.grey;
-    }
   }
 }
 
@@ -1050,7 +1110,6 @@ class _QuizScreenState extends State<QuizScreen> {
   void initState() {
     super.initState();
     _startTimer();
-    widget.questions.shuffle();
   }
 
   @override
@@ -1090,6 +1149,14 @@ class _QuizScreenState extends State<QuizScreen> {
 
   void _answerQuestion(bool isCorrect) {
     if (_isAnswered) return;
+
+    // Play sound based on correctness
+    if (isCorrect) {
+      Provider.of<SoundProvider>(context, listen: false).playCorrectSound();
+    } else {
+      Provider.of<SoundProvider>(context, listen: false).playIncorrectSound();
+    }
+
     setState(() {
       _isAnswered = true;
       _showExplanation = true;
@@ -1401,8 +1468,22 @@ class ResultScreen extends StatelessWidget {
     }
   }
 
+  // Method to check and update achievement progress
+  void _updateAchievements(BuildContext context) {
+    final userProvider = Provider.of<UserProvider>(context, listen: false);
+
+    // Increment 'Quiz Whiz' progress by 1
+    userProvider.updateAchievementProgress('quiz_whiz', 1);
+
+    // If a perfect score is achieved, update 'Perfectionist' progress to 1
+    if (score == totalQuestions) {
+      userProvider.updateAchievementProgress('perfectionist', 1);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
+    _updateAchievements(context); // Call the achievement update logic
     Provider.of<UserProvider>(context, listen: false).updateScore(score);
     final String rewardType = _getRewardType;
     return Scaffold(
@@ -1472,6 +1553,13 @@ class SettingsScreen extends StatefulWidget {
 
 class _SettingsScreenState extends State<SettingsScreen> {
   late TextEditingController _nameController;
+  final List<Color> _primaryColorOptions = [
+    const Color(0xFF009688), // Teal
+    Colors.deepPurple,
+    Colors.blue,
+    Colors.red,
+    Colors.green,
+  ];
 
   @override
   void initState() {
@@ -1502,6 +1590,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Widget build(BuildContext context) {
     final userProvider = Provider.of<UserProvider>(context);
     final themeProvider = Provider.of<ThemeProvider>(context);
+    final soundProvider = Provider.of<SoundProvider>(context);
 
     return Scaffold(
       appBar: AppBar(
@@ -1520,35 +1609,76 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ),
         foregroundColor: Colors.white,
       ),
-      body: Center(
-        child: Padding(
-          padding: const EdgeInsets.all(24.0),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              ListTile(
-                title: const Text('Toggle Dark/Light Mode'),
-                trailing: Switch(
-                  value: themeProvider.themeMode == ThemeMode.dark,
-                  onChanged: (value) {
-                    themeProvider.toggleTheme();
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(24.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Account', style: Theme.of(context).textTheme.titleLarge),
+            const SizedBox(height: 16),
+            TextFormField(
+              controller: _nameController,
+              decoration: InputDecoration(
+                labelText: 'Change Your Name',
+                suffixIcon: IconButton(
+                  icon: const Icon(Icons.save),
+                  onPressed: _updateUserName,
+                ),
+              ),
+            ),
+            const SizedBox(height: 32),
+            Text('Appearance', style: Theme.of(context).textTheme.titleLarge),
+            const SizedBox(height: 16),
+            ListTile(
+              title: const Text('Toggle Dark/Light Mode'),
+              trailing: Switch(
+                value: themeProvider.themeMode == ThemeMode.dark,
+                onChanged: (value) {
+                  themeProvider.toggleTheme();
+                },
+              ),
+            ),
+            const SizedBox(height: 16),
+            const Text('Primary Color'),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8.0,
+              runSpacing: 8.0,
+              children: _primaryColorOptions.map((color) {
+                return GestureDetector(
+                  onTap: () {
+                    themeProvider.setPrimaryColor(color);
                   },
-                ),
-              ),
-              const Divider(),
-              TextFormField(
-                controller: _nameController,
-                decoration: InputDecoration(
-                  labelText: 'Change Your Name',
-                  suffixIcon: IconButton(
-                    icon: const Icon(Icons.save),
-                    onPressed: _updateUserName,
+                  child: Container(
+                    width: 40,
+                    height: 40,
+                    decoration: BoxDecoration(
+                      color: color,
+                      shape: BoxShape.circle,
+                      border: Border.all(
+                        color: themeProvider.primaryColor == color
+                            ? Colors.blue
+                            : Colors.transparent,
+                        width: 3.0,
+                      ),
+                    ),
                   ),
-                ),
+                );
+              }).toList(),
+            ),
+            const SizedBox(height: 32),
+            Text('Sound', style: Theme.of(context).textTheme.titleLarge),
+            const SizedBox(height: 16),
+            ListTile(
+              title: const Text('Sound Effects'),
+              trailing: Switch(
+                value: soundProvider.isSoundEnabled,
+                onChanged: (value) {
+                  soundProvider.toggleSound();
+                },
               ),
-              const SizedBox(height: 20),
-            ],
-          ),
+            ),
+          ],
         ),
       ),
     );
@@ -1562,6 +1692,8 @@ class LeaderboardScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     final userProvider = Provider.of<UserProvider>(context);
     final leaderboardData = userProvider.leaderboardData;
+    final achievements = userProvider.achievements;
+    final achievementProgress = userProvider.achievementProgress;
     final currentUserId = userProvider.currentUserId;
 
     return Scaffold(
@@ -1581,14 +1713,63 @@ class LeaderboardScreen extends StatelessWidget {
         ),
         foregroundColor: Colors.white,
       ),
-      body: leaderboardData.isEmpty
-          ? const Center(child: Text('No scores to display yet.'))
-          : ListView.builder(
-              padding: const EdgeInsets.all(16.0),
-              itemCount: leaderboardData.length,
-              itemBuilder: (context, index) {
-                final entry = leaderboardData[index];
-                final rank = index + 1;
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Your Achievements Card
+            const Text(
+              'Your Achievements',
+              style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 10),
+            ...achievements.map((achievement) {
+              final progress = achievementProgress[achievement.id] ?? 0;
+              final target = achievement.targetValue;
+              final isCompleted = progress >= target;
+
+              return Card(
+                elevation: 4,
+                margin: const EdgeInsets.symmetric(vertical: 8),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(15),
+                ),
+                child: ListTile(
+                  leading: Icon(
+                    achievement.icon,
+                    size: 40,
+                    color: isCompleted
+                        ? Colors.green
+                        : Theme.of(context).colorScheme.primary,
+                  ),
+                  title: Text(
+                    achievement.title,
+                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  subtitle: Text(
+                    isCompleted ? 'Completed!' : achievement.description,
+                  ),
+                  trailing: isCompleted
+                      ? const Icon(Icons.check_circle, color: Colors.green)
+                      : Text('$progress / $target'),
+                ),
+              );
+            }).toList(),
+
+            const SizedBox(height: 20),
+
+            // Leaderboard List
+            const Text(
+              'Top Scores',
+              style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 10),
+            if (leaderboardData.isEmpty)
+              const Center(child: Text('No scores to display yet.'))
+            else
+              ...leaderboardData.map((entry) {
+                final rank = leaderboardData.indexOf(entry) + 1;
                 final isCurrentUser = entry.userId == currentUserId;
 
                 return Card(
@@ -1625,8 +1806,10 @@ class LeaderboardScreen extends StatelessWidget {
                     ),
                   ),
                 );
-              },
-            ),
+              }).toList(),
+          ],
+        ),
+      ),
     );
   }
 }
