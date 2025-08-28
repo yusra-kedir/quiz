@@ -90,91 +90,6 @@ class QuizApi {
   }
 }
 
-// ===== AI GENERATION SERVICE CLASS =====
-class AiService {
-  static Future<Question> generateQuestion({
-    required String apiKey,
-    required String topic,
-    required String difficulty,
-  }) async {
-    const String modelName = 'gemini-pro';
-    final Uri uri = Uri.parse(
-      'https://generativelanguage.googleapis.com/v1beta/models/$modelName:generateContent?key=$apiKey',
-    );
-
-    final String prompt =
-        """
-      I need a single multiple-choice quiz question.
-      - Category: $topic
-      - Difficulty: $difficulty
-      The question must have one correct answer and three incorrect answers.
-      Provide the response as a JSON object with the following structure:
-      {
-        "question": "The question text.",
-        "correct_answer": "The correct answer text.",
-        "incorrect_answers": ["Incorrect answer 1.", "Incorrect answer 2.", "Incorrect answer 3."]
-      }
-      Make sure the JSON is valid and only contains the specified fields. Do not include any other text in the response.
-    """;
-
-    final Map<String, dynamic> payload = {
-      "contents": [
-        {
-          "parts": [
-            {"text": prompt},
-          ],
-        },
-      ],
-    };
-
-    try {
-      final response = await http.post(
-        uri,
-        headers: {'Content-Type': 'application/json'},
-        body: json.encode(payload),
-      );
-
-      if (response.statusCode == 200) {
-        final data = json.decode(response.body);
-        final generatedText =
-            data['candidates'][0]['content']['parts'][0]['text'];
-
-        // Remove markdown backticks if they exist
-        final cleanedText = generatedText
-            .replaceAll('```json\n', '')
-            .replaceAll('```', '')
-            .trim();
-        final Map<String, dynamic> questionJson = json.decode(cleanedText);
-
-        // Build the question object
-        final String questionText = questionJson['question'] as String;
-        final String correctAnswer = questionJson['correct_answer'] as String;
-        final List<String> incorrectAnswers =
-            (questionJson['incorrect_answers'] as List).cast<String>();
-
-        List<Answer> answersList = [
-          Answer(text: correctAnswer, isCorrect: true),
-          ...incorrectAnswers.map((a) => Answer(text: a, isCorrect: false)),
-        ];
-
-        // Shuffle the answers
-        answersList.shuffle();
-
-        return Question(
-          questionText: questionText,
-          answers: answersList,
-          category: topic,
-          difficulty: difficulty,
-        );
-      } else {
-        throw Exception('Failed to generate question: ${response.statusCode}');
-      }
-    } catch (e) {
-      throw Exception('Error generating question: $e');
-    }
-  }
-}
-
 // ===== DATA MODELS AND PROVIDERS =====
 class Question {
   final String questionText;
@@ -268,7 +183,6 @@ class UserProvider with ChangeNotifier {
   bool _isInitialized = false;
   bool _isTeacher = false;
   int _highestScore = 0;
-  String _apiKey = ''; // New field for API key
 
   // Achievement data
   final List<Achievement> _achievements = [
@@ -304,7 +218,6 @@ class UserProvider with ChangeNotifier {
   int get highestScore => _highestScore;
   List<Achievement> get achievements => _achievements;
   Map<String, int> get achievementProgress => _achievementProgress;
-  String get apiKey => _apiKey; // New getter for API key
 
   Future<void> initUser() async {
     final prefs = await SharedPreferences.getInstance();
@@ -314,7 +227,6 @@ class UserProvider with ChangeNotifier {
     _profileImageUrl = prefs.getString('profileImageUrl') ?? '';
     _isTeacher = prefs.getBool('isTeacher') ?? false;
     _highestScore = prefs.getInt('highestScore') ?? 0;
-    _apiKey = prefs.getString('apiKey') ?? ''; // Load API key
 
     // Load achievement progress from SharedPreferences
     final progressString = prefs.getString('achievementProgress') ?? '{}';
@@ -465,13 +377,6 @@ class UserProvider with ChangeNotifier {
 
     await prefs.setString('userName', newName);
     await prefs.setString('profileImageUrl', newImageUrl);
-    notifyListeners();
-  }
-
-  Future<void> saveApiKey(String key) async {
-    final prefs = await SharedPreferences.getInstance();
-    _apiKey = key;
-    await prefs.setString('apiKey', key);
     notifyListeners();
   }
 
@@ -658,17 +563,7 @@ class QuizApp extends StatelessWidget {
           brightness: Brightness.dark,
         ),
       ),
-      home: Consumer<UserProvider>(
-        builder: (context, userProvider, child) {
-          if (!userProvider.isInitialized) {
-            return const SplashScreen();
-          } else if (userProvider.isLoggedIn) {
-            return const MainScreen();
-          } else {
-            return const AuthScreen();
-          }
-        },
-      ),
+      home: const SplashScreen(),
     );
   }
 }
@@ -706,11 +601,39 @@ class _SplashScreenState extends State<SplashScreen>
     ).animate(CurvedAnimation(parent: _controller, curve: Curves.easeIn));
 
     _controller.forward();
+
+    // Start a timer to navigate after 3 seconds
+    _timer = Timer(const Duration(seconds: 3), () {
+      _navigateToNextScreen();
+    });
+  }
+
+  void _navigateToNextScreen() {
+    final userProvider = Provider.of<UserProvider>(context, listen: false);
+    if (!userProvider.isInitialized) {
+      userProvider.initUser().then((_) {
+        _performNavigation();
+      });
+    } else {
+      _performNavigation();
+    }
+  }
+
+  void _performNavigation() {
+    final userProvider = Provider.of<UserProvider>(context, listen: false);
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(
+        builder: (context) =>
+            userProvider.isLoggedIn ? const MainScreen() : const AuthScreen(),
+      ),
+    );
   }
 
   @override
   void dispose() {
     _controller.dispose();
+    _timer.cancel();
     super.dispose();
   }
 
@@ -835,7 +758,8 @@ class _MainScreenState extends State<MainScreen> {
         ],
       ),
       drawer: Drawer(
-        child: Column(
+        child: ListView(
+          padding: EdgeInsets.zero,
           children: <Widget>[
             DrawerHeader(
               decoration: BoxDecoration(
@@ -874,57 +798,48 @@ class _MainScreenState extends State<MainScreen> {
                 ],
               ),
             ),
-            Expanded(
-              child: ListView(
-                padding: EdgeInsets.zero,
-                children: <Widget>[
-                  ListTile(
-                    leading: const Icon(Icons.home),
-                    title: const Text('Home'),
-                    selected: _selectedIndex == 0,
-                    onTap: () {
-                      Navigator.pop(context);
-                      setState(() => _selectedIndex = 0);
-                    },
-                  ),
-                  ListTile(
-                    leading: const Icon(Icons.quiz),
-                    title: const Text('Quizzes'),
-                    selected: _selectedIndex == 1,
-                    onTap: () {
-                      Navigator.pop(context);
-                      setState(() => _selectedIndex = 1);
-                    },
-                  ),
-                  ListTile(
-                    leading: const Icon(Icons.leaderboard),
-                    title: const Text('Leaderboard'),
-                    selected: _selectedIndex == 2,
-                    onTap: () {
-                      Navigator.pop(context);
-                      setState(() => _selectedIndex = 2);
-                    },
-                  ),
-                  const Divider(),
-                  ListTile(
-                    leading: const Icon(Icons.settings),
-                    title: const Text('Settings'),
-                    onTap: _navigateToSettings,
-                  ),
-                  ListTile(
-                    leading: const Icon(Icons.logout, color: Colors.red),
-                    title: const Text(
-                      'Log Out',
-                      style: TextStyle(color: Colors.red),
-                    ),
-                    onTap: _logout,
-                  ),
-                ],
-              ),
+            ListTile(
+              leading: const Icon(Icons.home),
+              title: const Text('Home'),
+              selected: _selectedIndex == 0,
+              onTap: () {
+                Navigator.pop(context);
+                setState(() => _selectedIndex = 0);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.quiz),
+              title: const Text('Quizzes'),
+              selected: _selectedIndex == 1,
+              onTap: () {
+                Navigator.pop(context);
+                setState(() => _selectedIndex = 1);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.leaderboard),
+              title: const Text('Leaderboard'),
+              selected: _selectedIndex == 2,
+              onTap: () {
+                Navigator.pop(context);
+                setState(() => _selectedIndex = 2);
+              },
+            ),
+            const Divider(),
+            ListTile(
+              leading: const Icon(Icons.settings),
+              title: const Text('Settings'),
+              onTap: _navigateToSettings,
+            ),
+            ListTile(
+              leading: const Icon(Icons.logout, color: Colors.red),
+              title: const Text('Log Out', style: TextStyle(color: Colors.red)),
+              onTap: _logout,
             ),
           ],
         ),
       ),
+      body: Center(child: _widgetOptions.elementAt(_selectedIndex)),
       bottomNavigationBar: BottomNavigationBar(
         items: const <BottomNavigationBarItem>[
           BottomNavigationBarItem(icon: Icon(Icons.home), label: 'Home'),
@@ -939,7 +854,6 @@ class _MainScreenState extends State<MainScreen> {
         unselectedItemColor: Colors.grey,
         onTap: _onItemTapped,
       ),
-      body: _widgetOptions.elementAt(_selectedIndex),
     );
   }
 }
@@ -1053,45 +967,8 @@ class _AuthScreenState extends State<AuthScreen> {
 }
 
 // ===== APP SCREENS (PAGES) =====
-class WelcomeScreen extends StatefulWidget {
+class WelcomeScreen extends StatelessWidget {
   const WelcomeScreen({super.key});
-
-  @override
-  State<WelcomeScreen> createState() => _WelcomeScreenState();
-}
-
-class _WelcomeScreenState extends State<WelcomeScreen>
-    with SingleTickerProviderStateMixin {
-  late AnimationController _controller;
-  late Animation<double> _scaleAnimation;
-  late Animation<double> _fadeAnimation;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = AnimationController(
-      vsync: this,
-      duration: const Duration(seconds: 1),
-    );
-
-    _scaleAnimation = Tween<double>(
-      begin: 0.0,
-      end: 1.0,
-    ).animate(CurvedAnimation(parent: _controller, curve: Curves.elasticOut));
-
-    _fadeAnimation = Tween<double>(
-      begin: 0.0,
-      end: 1.0,
-    ).animate(CurvedAnimation(parent: _controller, curve: Curves.easeIn));
-
-    _controller.forward();
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -1112,34 +989,25 @@ class _WelcomeScreenState extends State<WelcomeScreen>
             mainAxisAlignment: MainAxisAlignment.center,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              ScaleTransition(
-                scale: _scaleAnimation,
-                child: FadeTransition(
-                  opacity: _fadeAnimation,
-                  child: Icon(
-                    Icons.emoji_events,
-                    size: 150,
-                    color: Theme.of(context).colorScheme.tertiary,
-                  ),
+              Hero(
+                tag: 'logo',
+                child: Icon(
+                  Icons.emoji_events,
+                  size: 150,
+                  color: Theme.of(context).colorScheme.tertiary,
                 ),
               ),
               const SizedBox(height: 20),
-              FadeTransition(
-                opacity: _fadeAnimation,
-                child: Text(
-                  welcomeMessage,
-                  style: Theme.of(context).textTheme.headlineMedium,
-                  textAlign: TextAlign.center,
-                ),
+              Text(
+                welcomeMessage,
+                style: Theme.of(context).textTheme.headlineMedium,
+                textAlign: TextAlign.center,
               ),
               const SizedBox(height: 10),
-              FadeTransition(
-                opacity: _fadeAnimation,
-                child: Text(
-                  'Test Your Knowledge on Quiz Quest!',
-                  style: Theme.of(context).textTheme.bodyMedium,
-                  textAlign: TextAlign.center,
-                ),
+              Text(
+                'Test Your Knowledge on Quiz Quest!',
+                style: Theme.of(context).textTheme.bodyMedium,
+                textAlign: TextAlign.center,
               ),
             ],
           ),
@@ -1911,22 +1779,6 @@ class _ResultScreenState extends State<ResultScreen>
   @override
   Widget build(BuildContext context) {
     final String rewardType = _getRewardType;
-    String emoji;
-    String message;
-
-    if (widget.score == widget.totalQuestions) {
-      emoji = '💯';
-      message = 'Perfect Score!';
-    } else if (widget.score >= widget.totalQuestions * 0.75) {
-      emoji = '🎉';
-      message = 'Great Job!';
-    } else if (widget.score >= widget.totalQuestions * 0.5) {
-      emoji = '👍';
-      message = 'Good Effort!';
-    } else {
-      emoji = '😅';
-      message = 'Keep Practicing!';
-    }
 
     return Scaffold(
       body: Stack(
@@ -1957,21 +1809,22 @@ class _ResultScreenState extends State<ResultScreen>
                         color: Colors.white,
                       ),
                     ),
-                  Text(emoji, style: const TextStyle(fontSize: 100)),
+                  Icon(
+                    rewardType == 'master'
+                        ? Icons.emoji_events
+                        : Icons.check_circle,
+                    size: 100,
+                    color: Colors.white,
+                  ),
                   const SizedBox(height: 20),
                   Text(
-                    message,
+                    'You scored ${widget.score} out of ${widget.totalQuestions}!',
                     textAlign: TextAlign.center,
                     style: const TextStyle(
                       fontSize: 28,
                       fontWeight: FontWeight.bold,
                       color: Colors.white,
                     ),
-                  ),
-                  Text(
-                    'You answered ${widget.score} out of ${widget.totalQuestions} correctly!',
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(fontSize: 18, color: Colors.white70),
                   ),
                   const SizedBox(height: 40),
                   ElevatedButton(
@@ -2035,7 +1888,6 @@ class SettingsScreen extends StatefulWidget {
 class _SettingsScreenState extends State<SettingsScreen> {
   late TextEditingController _nameController;
   late TextEditingController _imageController;
-  late TextEditingController _apiKeyController;
   final List<Color> _primaryColorOptions = [
     const Color(0xFF009688), // Teal
     Colors.deepPurple,
@@ -2052,16 +1904,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _imageController = TextEditingController(
       text: userProvider.profileImageUrl,
     );
-    _apiKeyController = TextEditingController(
-      text: userProvider.apiKey,
-    ); // Initialize API key controller
   }
 
   @override
   void dispose() {
     _nameController.dispose();
     _imageController.dispose();
-    _apiKeyController.dispose(); // Dispose API key controller
     super.dispose();
   }
 
@@ -2076,17 +1924,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
         );
       });
     }
-  }
-
-  void _saveApiKey() {
-    Provider.of<UserProvider>(
-      context,
-      listen: false,
-    ).saveApiKey(_apiKeyController.text).then((_) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('API Key saved!')));
-    });
   }
 
   @override
@@ -2174,49 +2011,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   shadowColor: Theme.of(
                     context,
                   ).colorScheme.primary.withOpacity(0.5),
-                  elevation: 8,
-                ),
-              ),
-            ),
-            const SizedBox(height: 32),
-            const Divider(),
-
-            // AI Integration Section
-            const SizedBox(height: 32),
-            Text(
-              'AI Integration',
-              style: Theme.of(context).textTheme.titleLarge,
-            ),
-            const SizedBox(height: 16),
-            TextFormField(
-              controller: _apiKeyController,
-              decoration: InputDecoration(
-                labelText: 'Gemini API Key',
-                hintText: 'Paste your API key here',
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12),
-                ),
-              ),
-              obscureText: true,
-            ),
-            const SizedBox(height: 16),
-            Center(
-              child: ElevatedButton.icon(
-                onPressed: _saveApiKey,
-                icon: const Icon(Icons.cloud_upload, color: Colors.white),
-                label: const Text(
-                  'Save API Key',
-                  style: TextStyle(color: Colors.white),
-                ),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Theme.of(context).colorScheme.tertiary,
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 24,
-                    vertical: 12,
-                  ),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(15),
-                  ),
                   elevation: 8,
                 ),
               ),
@@ -2411,68 +2205,47 @@ class LeaderboardScreen extends StatelessWidget {
               ...leaderboardData.map((entry) {
                 final rank = leaderboardData.indexOf(entry) + 1;
                 final isCurrentUser = entry.userId == currentUserId;
+
                 return Card(
-                  elevation: isCurrentUser ? 8 : 4,
                   color: isCurrentUser
-                      ? Theme.of(context).colorScheme.primary.withOpacity(0.1)
+                      ? Theme.of(context).colorScheme.primary.withOpacity(0.2)
                       : null,
-                  margin: const EdgeInsets.symmetric(vertical: 8),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(15),
-                    side: isCurrentUser
-                        ? BorderSide(
-                            color: Theme.of(context).colorScheme.primary,
-                            width: 2,
-                          )
-                        : BorderSide.none,
-                  ),
+                  elevation: isCurrentUser ? 8 : 4,
+                  margin: const EdgeInsets.symmetric(vertical: 8.0),
                   child: ListTile(
-                    leading: SizedBox(
-                      width: 60,
-                      child: Row(
-                        children: [
-                          Text(
-                            '$rank.',
-                            style: const TextStyle(
-                              fontSize: 18,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          CircleAvatar(
-                            radius: 18,
-                            backgroundColor: Theme.of(
-                              context,
-                            ).colorScheme.tertiary,
-                            backgroundImage: entry.profileImageUrl.isNotEmpty
-                                ? NetworkImage(entry.profileImageUrl)
-                                : null,
-                            child: entry.profileImageUrl.isEmpty
-                                ? const Icon(
-                                    Icons.person,
-                                    size: 20,
-                                    color: Colors.white,
-                                  )
-                                : null,
-                          ),
-                        ],
-                      ),
+                    leading: CircleAvatar(
+                      backgroundColor: isCurrentUser
+                          ? Theme.of(context).colorScheme.tertiary
+                          : Theme.of(context).colorScheme.primary,
+                      backgroundImage: entry.profileImageUrl.isNotEmpty
+                          ? NetworkImage(entry.profileImageUrl)
+                          : null,
+                      child: entry.profileImageUrl.isEmpty
+                          ? Text(
+                              '$rank',
+                              style: TextStyle(
+                                color: Theme.of(context).colorScheme.onPrimary,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            )
+                          : null,
                     ),
                     title: Text(
                       entry.name,
-                      style: const TextStyle(fontWeight: FontWeight.bold),
+                      style: TextStyle(
+                        fontWeight: isCurrentUser
+                            ? FontWeight.bold
+                            : FontWeight.normal,
+                        color: Theme.of(context).colorScheme.onSurface,
+                      ),
                     ),
                     trailing: Text(
-                      '${entry.score}',
-                      style: const TextStyle(
-                        fontWeight: FontWeight.bold,
-                        fontSize: 18,
-                      ),
+                      'Score: ${entry.score}',
+                      style: Theme.of(context).textTheme.bodyLarge,
                     ),
                   ),
                 );
               }),
-            const SizedBox(height: 20),
           ],
         ),
       ),
@@ -2482,81 +2255,39 @@ class LeaderboardScreen extends StatelessWidget {
 
 class QuizCreationScreen extends StatefulWidget {
   const QuizCreationScreen({super.key});
-
   @override
   State<QuizCreationScreen> createState() => _QuizCreationScreenState();
 }
 
 class _QuizCreationScreenState extends State<QuizCreationScreen> {
   final _formKey = GlobalKey<FormState>();
-  String _questionText = '';
-  String _correctAnswer = '';
-  List<String> _incorrectAnswers = [''];
-  String _category = QuizApi.availableCategories.first; // Use the same list
-  String _difficulty = QuizApi.availableDifficulties.first;
-  final ScrollController _scrollController = ScrollController();
+  final _categoryController = TextEditingController();
+  final _questionController = TextEditingController();
+  final _explanationController = TextEditingController();
+  final List<TextEditingController> _answerControllers = List.generate(
+    4,
+    (index) => TextEditingController(),
+  );
+  List<bool> _isCorrect = List.generate(4, (index) => false);
+  String? _selectedDifficulty = 'easy';
   bool _isLoading = false;
 
-  void _addIncorrectAnswerField() {
-    setState(() {
-      _incorrectAnswers.add('');
-    });
-    // Scroll to the bottom to show the new field
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _scrollController.animateTo(
-        _scrollController.position.maxScrollExtent,
-        duration: const Duration(milliseconds: 300),
-        curve: Curves.easeOut,
-      );
-    });
-  }
-
-  void _removeIncorrectAnswerField(int index) {
-    setState(() {
-      _incorrectAnswers.removeAt(index);
-    });
-  }
-
-  void _submitQuiz() {
-    if (_formKey.currentState!.validate()) {
-      _formKey.currentState!.save();
-
-      final newQuestion = Question(
-        questionText: _questionText,
-        answers: [
-          Answer(text: _correctAnswer, isCorrect: true),
-          ..._incorrectAnswers.map(
-            (ans) => Answer(text: ans, isCorrect: false),
-          ),
-        ],
-        category: _category,
-        difficulty: _difficulty,
-      );
-
-      Provider.of<QuizProvider>(context, listen: false).addQuiz(newQuestion);
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Quiz question created successfully!')),
-      );
-
-      // Clear the form
-      setState(() {
-        _formKey.currentState!.reset();
-        _incorrectAnswers = [''];
-        _category = QuizApi.availableCategories.first;
-        _difficulty = QuizApi.availableDifficulties.first;
-      });
+  @override
+  void dispose() {
+    _categoryController.dispose();
+    _questionController.dispose();
+    _explanationController.dispose();
+    for (var controller in _answerControllers) {
+      controller.dispose();
     }
+    super.dispose();
   }
 
-  Future<void> _generateWithAI() async {
-    final userProvider = Provider.of<UserProvider>(context, listen: false);
-    final apiKey = userProvider.apiKey;
-
-    if (apiKey.isEmpty) {
+  Future<void> _generateQuestionWithAI() async {
+    if (_categoryController.text.isEmpty || _selectedDifficulty == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Please save your Gemini API key in Settings first!'),
+          content: Text('Please enter a category and select a difficulty.'),
         ),
       );
       return;
@@ -2564,27 +2295,77 @@ class _QuizCreationScreenState extends State<QuizCreationScreen> {
 
     setState(() {
       _isLoading = true;
+      _questionController.clear();
+      _explanationController.clear();
+      for (var controller in _answerControllers) {
+        controller.clear();
+      }
+      _isCorrect = List.generate(4, (index) => false);
     });
 
     try {
-      final generatedQuestion = await AiService.generateQuestion(
-        apiKey: apiKey,
-        topic: _category,
-        difficulty: _difficulty,
+      final prompt =
+          """
+      Generate a single new multiple-choice quiz question with the following properties:
+      - Category: "${_categoryController.text}"
+      - Difficulty: "$_selectedDifficulty"
+      - Must have exactly one correct answer.
+      - Must have exactly 4 possible answers.
+      - Must include a brief explanation.
+      
+      Provide the response as a JSON object with the following schema:
+      {
+        "questionText": "string",
+        "answers": [
+          {"text": "string", "isCorrect": boolean},
+          {"text": "string", "isCorrect": boolean},
+          {"text": "string", "isCorrect": boolean},
+          {"text": "string", "isCorrect": boolean}
+        ],
+        "explanation": "string"
+      }
+      """;
+
+      const apiKey = '';
+      const apiUrl =
+          'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=$apiKey';
+
+      final response = await http.post(
+        Uri.parse(apiUrl),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          "contents": [
+            {
+              "parts": [
+                {"text": prompt},
+              ],
+            },
+          ],
+        }),
       );
 
-      Provider.of<QuizProvider>(
-        context,
-        listen: false,
-      ).addQuiz(generatedQuestion);
+      if (response.statusCode == 200) {
+        final jsonResponse = jsonDecode(response.body);
+        final generatedText =
+            jsonResponse['candidates'][0]['content']['parts'][0]['text'];
+        final questionData = jsonDecode(generatedText);
 
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('AI-generated question added!')),
-      );
+        setState(() {
+          _questionController.text = questionData['questionText'];
+          _explanationController.text = questionData['explanation'];
+
+          for (int i = 0; i < 4; i++) {
+            _answerControllers[i].text = questionData['answers'][i]['text'];
+            _isCorrect[i] = questionData['answers'][i]['isCorrect'];
+          }
+        });
+      } else {
+        throw Exception('Failed to generate question: ${response.statusCode}');
+      }
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error generating question: ${e.toString()}')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Error generating question: $e')));
     } finally {
       setState(() {
         _isLoading = false;
@@ -2592,17 +2373,57 @@ class _QuizCreationScreenState extends State<QuizCreationScreen> {
     }
   }
 
-  @override
-  void dispose() {
-    _scrollController.dispose();
-    super.dispose();
+  void _submitQuiz() {
+    if (_formKey.currentState!.validate()) {
+      final quizProvider = Provider.of<QuizProvider>(context, listen: false);
+
+      final List<Answer> answers = _answerControllers.asMap().entries.map((
+        entry,
+      ) {
+        final index = entry.key;
+        final controller = entry.value;
+        return Answer(text: controller.text, isCorrect: _isCorrect[index]);
+      }).toList();
+
+      final newQuiz = Question(
+        questionText: _questionController.text,
+        answers: answers,
+        category: _categoryController.text,
+        difficulty: _selectedDifficulty!,
+        explanation: _explanationController.text,
+      );
+
+      quizProvider.addQuiz(newQuiz);
+
+      // Show confirmation dialog
+      showDialog(
+        context: context,
+        builder: (BuildContext context) {
+          return AlertDialog(
+            title: const Text('Quiz Created!'),
+            content: const Text(
+              'Your new quiz has been added to "My Quizzes" and is ready to play.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () {
+                  Navigator.of(context).pop();
+                  Navigator.of(context).pop();
+                },
+                child: const Text('OK'),
+              ),
+            ],
+          );
+        },
+      );
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Create a Quiz'),
+        title: const Text('Create a New Quiz'),
         flexibleSpace: Container(
           decoration: BoxDecoration(
             gradient: LinearGradient(
@@ -2618,192 +2439,153 @@ class _QuizCreationScreenState extends State<QuizCreationScreen> {
         foregroundColor: Colors.white,
       ),
       body: SingleChildScrollView(
-        controller: _scrollController,
-        padding: const EdgeInsets.all(24.0),
+        padding: const EdgeInsets.all(16.0),
         child: Form(
           key: _formKey,
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Text(
-                'Create Your Own Question',
-                style: Theme.of(context).textTheme.headlineMedium,
-                textAlign: TextAlign.center,
-              ),
-              const SizedBox(height: 20),
-
-              // Category and Difficulty Dropdowns
-              DropdownButtonFormField<String>(
+              TextFormField(
+                controller: _categoryController,
                 decoration: InputDecoration(
-                  labelText: 'Category',
+                  labelText: 'Quiz Category',
                   border: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(12),
                   ),
                 ),
-                value: _category,
-                items: QuizApi.availableCategories
-                    .map(
-                      (cat) => DropdownMenuItem(value: cat, child: Text(cat)),
-                    )
-                    .toList(),
-                onChanged: (value) {
-                  setState(() => _category = value!);
+                validator: (value) {
+                  if (value == null || value.isEmpty) {
+                    return 'Please enter a category name.';
+                  }
+                  return null;
                 },
               ),
               const SizedBox(height: 20),
               DropdownButtonFormField<String>(
+                value: _selectedDifficulty,
                 decoration: InputDecoration(
                   labelText: 'Difficulty',
                   border: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(12),
                   ),
                 ),
-                value: _difficulty,
-                items: QuizApi.availableDifficulties
-                    .map(
-                      (diff) =>
-                          DropdownMenuItem(value: diff, child: Text(diff)),
-                    )
-                    .toList(),
-                onChanged: (value) {
-                  setState(() => _difficulty = value!);
+                items: ['easy', 'medium', 'hard'].map((String value) {
+                  return DropdownMenuItem<String>(
+                    value: value,
+                    child: Text(value.toUpperCase()),
+                  );
+                }).toList(),
+                onChanged: (String? newValue) {
+                  setState(() {
+                    _selectedDifficulty = newValue;
+                  });
                 },
-              ),
-              const SizedBox(height: 30),
-
-              // AI Generation Button
-              if (_isLoading)
-                const Center(child: CircularProgressIndicator())
-              else
-                ElevatedButton.icon(
-                  onPressed: _generateWithAI,
-                  icon: const Icon(Icons.psychology, color: Colors.white),
-                  label: const Text(
-                    'Generate with AI',
-                    style: TextStyle(color: Colors.white),
-                  ),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.indigo,
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 24,
-                      vertical: 16,
-                    ),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(15),
-                    ),
-                    elevation: 8,
-                  ),
-                ),
-
-              const SizedBox(height: 30),
-              const Divider(),
-              const SizedBox(height: 20),
-
-              Text(
-                '...or Manually Create One',
-                style: Theme.of(context).textTheme.titleLarge,
-                textAlign: TextAlign.center,
-              ),
-              const SizedBox(height: 20),
-
-              // Question Text Field
-              TextFormField(
-                decoration: InputDecoration(
-                  labelText: 'Question Text',
-                  hintText: 'e.g., What is the capital of France?',
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                ),
-                maxLines: 3,
-                validator: (value) {
-                  if (value == null || value.isEmpty) {
-                    return 'Please enter a question';
-                  }
-                  return null;
-                },
-                onSaved: (value) => _questionText = value!,
-              ),
-              const SizedBox(height: 20),
-
-              // Correct Answer Field
-              TextFormField(
-                decoration: InputDecoration(
-                  labelText: 'Correct Answer',
-                  hintText: 'e.g., Paris',
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                ),
-                validator: (value) {
-                  if (value == null || value.isEmpty) {
-                    return 'Please enter the correct answer';
-                  }
-                  return null;
-                },
-                onSaved: (value) => _correctAnswer = value!,
-              ),
-              const SizedBox(height: 20),
-
-              // Incorrect Answers Fields
-              ..._incorrectAnswers.asMap().entries.map((entry) {
-                final index = entry.key;
-                return Padding(
-                  padding: const EdgeInsets.only(bottom: 12.0),
-                  child: TextFormField(
-                    decoration: InputDecoration(
-                      labelText: 'Incorrect Answer #${index + 1}',
-                      suffixIcon: index > 0
-                          ? IconButton(
-                              icon: const Icon(
-                                Icons.remove_circle_outline,
-                                color: Colors.red,
-                              ),
-                              onPressed: () =>
-                                  _removeIncorrectAnswerField(index),
-                            )
-                          : null,
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                    ),
-                    validator: (value) {
-                      if (value == null || value.isEmpty) {
-                        return 'Please enter an incorrect answer';
-                      }
-                      return null;
-                    },
-                    onChanged: (value) => _incorrectAnswers[index] = value,
-                    onSaved: (value) => _incorrectAnswers[index] = value!,
-                  ),
-                );
-              }),
-
-              const SizedBox(height: 10),
-              ElevatedButton.icon(
-                onPressed: _addIncorrectAnswerField,
-                icon: const Icon(Icons.add_circle_outline),
-                label: const Text('Add another incorrect answer'),
               ),
               const SizedBox(height: 20),
               ElevatedButton.icon(
-                onPressed: _submitQuiz,
-                icon: const Icon(Icons.save, color: Colors.white),
-                label: const Text(
-                  'Save Question',
-                  style: TextStyle(color: Colors.white),
+                onPressed: _isLoading ? null : _generateQuestionWithAI,
+                icon: _isLoading
+                    ? const CircularProgressIndicator.adaptive(
+                        strokeWidth: 2,
+                        backgroundColor: Colors.white,
+                      )
+                    : const Icon(Icons.auto_awesome, color: Colors.white),
+                label: Text(
+                  _isLoading ? 'Generating...' : 'Generate with AI',
+                  style: const TextStyle(color: Colors.white),
                 ),
                 style: ElevatedButton.styleFrom(
-                  backgroundColor: Theme.of(context).colorScheme.tertiary,
+                  backgroundColor: Theme.of(context).colorScheme.primary,
                   padding: const EdgeInsets.symmetric(
                     horizontal: 24,
-                    vertical: 16,
+                    vertical: 12,
                   ),
                   shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(15),
                   ),
+                  shadowColor: Theme.of(
+                    context,
+                  ).colorScheme.primary.withOpacity(0.5),
                   elevation: 8,
                 ),
+              ),
+              const SizedBox(height: 20),
+              TextFormField(
+                controller: _questionController,
+                decoration: InputDecoration(
+                  labelText: 'Question',
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+                validator: (value) {
+                  if (value == null || value.isEmpty) {
+                    return 'Please enter a question.';
+                  }
+                  return null;
+                },
+                minLines: 1,
+                maxLines: 5,
+              ),
+              const SizedBox(height: 20),
+              ..._answerControllers.asMap().entries.map((entry) {
+                final index = entry.key;
+                final controller = entry.value;
+                return Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 8.0),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: TextFormField(
+                          controller: controller,
+                          decoration: InputDecoration(
+                            labelText: 'Answer ${index + 1}',
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                          ),
+                          validator: (value) {
+                            if (value == null || value.isEmpty) {
+                              return 'Please enter an answer.';
+                            }
+                            return null;
+                          },
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Checkbox(
+                        value: _isCorrect[index],
+                        onChanged: (bool? value) {
+                          if (value == true) {
+                            setState(() {
+                              for (int i = 0; i < _isCorrect.length; i++) {
+                                _isCorrect[i] = (i == index);
+                              }
+                            });
+                          }
+                        },
+                      ),
+                      const Text('Correct'),
+                    ],
+                  ),
+                );
+              }),
+              const SizedBox(height: 20),
+              TextFormField(
+                controller: _explanationController,
+                decoration: InputDecoration(
+                  labelText: 'Explanation (Optional)',
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+                minLines: 1,
+                maxLines: 5,
+              ),
+              const SizedBox(height: 20),
+              ElevatedButton(
+                onPressed: _submitQuiz,
+                child: const Text('Create Quiz'),
               ),
             ],
           ),

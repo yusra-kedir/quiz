@@ -2053,8 +2053,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
       text: userProvider.profileImageUrl,
     );
     _apiKeyController = TextEditingController(
-      text: userProvider.apiKey,
-    ); // Initialize API key controller
+      text: 'AIzaSyCVaOByYC7GEJsHytMB_FewPfLfSww3fRk',
+    ); // Initialize API key controller with the provided key
   }
 
   @override
