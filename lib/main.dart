@@ -845,7 +845,7 @@ class _MainScreenState extends State<MainScreen> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   CircleAvatar(
-                    radius: 35,
+                    radius: 30,
                     backgroundColor: Theme.of(context).colorScheme.tertiary,
                     backgroundImage: userProvider.profileImageUrl.isNotEmpty
                         ? NetworkImage(userProvider.profileImageUrl)
@@ -2428,7 +2428,7 @@ class LeaderboardScreen extends StatelessWidget {
                   ),
                   child: ListTile(
                     leading: SizedBox(
-                      width: 60,
+                      width: 90,
                       child: Row(
                         children: [
                           Text(
@@ -2582,9 +2582,9 @@ class _QuizCreationScreenState extends State<QuizCreationScreen> {
         const SnackBar(content: Text('AI-generated question added!')),
       );
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error generating question: ${e.toString()}')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('will be added soon: $e')));
     } finally {
       setState(() {
         _isLoading = false;
